@@ -14,11 +14,12 @@ class Dashboard(BaseHTTPRequestHandler):
         if route.path == "/":
             data = Path(__file__).with_name("index.html").read_bytes()
             mime = "text/html; charset=utf-8"
-        elif route.path == "/issues":
+        elif route.path in ("/issues", "/comments"):
             page = parse_qs(route.query).get("page", ["1"])[0]
             if not page.isascii() or not page.isdigit() or len(page) > 6:
                 return self.send_error(400)
-            endpoint = f"repos/{REPO}/issues?state=all&sort=updated&per_page=100&page={page}"
+            resource = "issues?state=all&sort=updated" if route.path == "/issues" else "issues/comments?sort=created&direction=desc"
+            endpoint = f"repos/{REPO}/{resource}&per_page=100&page={page}"
             try:
                 data = subprocess.check_output(["gh", "api", endpoint], timeout=25)
                 if not isinstance(json.loads(data), list):
