@@ -14,6 +14,9 @@ class Dashboard(BaseHTTPRequestHandler):
         if route.path == "/":
             data = Path(__file__).with_name("index.html").read_bytes()
             mime = "text/html; charset=utf-8"
+        elif route.path in {"/tester.webp", "/coordinator.webp", "/interface.webp", "/developer.webp", "/background.webp"}:
+            data = Path(__file__).with_name(route.path[1:]).read_bytes()
+            mime = "image/webp"
         elif route.path in ("/issues", "/comments"):
             page = parse_qs(route.query).get("page", ["1"])[0]
             if not page.isascii() or not page.isdigit() or len(page) > 6:
