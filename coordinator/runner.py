@@ -109,9 +109,20 @@ class Codex:
 
 
 class Sessions:
-    def __init__(self, run, model):
+    def __init__(self, run, model, *, journal=None):
         self.run = run
         self.model = model
+        self.journal = journal
+
+    def invoke(self, key, role, instruction, payload, contract):
+        if self.journal:
+            self.journal.emit("agent.started", role=role, step=key,
+                              version=payload.get("sha", self.run.state["meta"]["base"]))
+        result = self.model(role, instruction, payload, contract)
+        if self.journal:
+            self.journal.emit("agent.finished", role=role, step=key,
+                              status="error" if result.get("error") else "ok")
+        return result
 
     def batch(self, jobs):
         cached = self.run.state["sessions"]
@@ -120,7 +131,7 @@ class Sessions:
             raise Blocked("Исчерпан лимит из восьми сессий.")
         if pending:
             with ThreadPoolExecutor(max_workers=2) as pool:
-                futures = [(key, pool.submit(self.model, *args)) for key, *args in pending]
+                futures = [(key, pool.submit(self.invoke, key, *args)) for key, *args in pending]
                 for key, future in futures:
                     cached[key] = future.result()
                     self.run.save()

@@ -1,4 +1,4 @@
-"""Optional V2 orchestration. The V1 entry points and workflows stay independent."""
+"""V2 planning, execution and QA behind the shared coordinator route."""
 
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -83,11 +83,14 @@ def compact(snapshot):
 
 
 class Engine:
-    def __init__(self, base, project, features, sandbox, agent, journal):
+    def __init__(self, base, project, features, sandbox, agent, journal, *, export_candidate=True):
         self.base, self.project, self.features = base, project, features
         self.sandbox, self.agent, self.journal = sandbox, agent, journal
         self.mcp = Gateway()
         self.sessions = []
+        self.qa_rounds = []
+        self.criteria = []
+        self.export_candidate = export_candidate
         self.lock = Lock()
 
     def invoke(self, role, instruction, payload, contract, round_no):
@@ -158,9 +161,9 @@ class Engine:
     def run(self, snapshot, current, fixture_plan=None):
         offline = fixture_plan is not None
         self.backend = "offline-fixture" if offline else "codex"
+        sandbox_image = getattr(self.sandbox, "image", None)
         self.journal.emit("run.started", base=self.base, features=sorted(self.features), backend=self.backend,
-                          sandbox_image=getattr(self.sandbox, "image", None)
-                          if isinstance(getattr(self.sandbox, "image", None), str) else None)
+                          sandbox_image=sandbox_image if isinstance(sandbox_image, str) else None)
         original = digest(snapshot)
         def recheck():
             if digest(current()) != original:
@@ -191,6 +194,7 @@ class Engine:
                         if "mcp" in self.features else {},
                     }, PLAN, 0)
             assignments, waves = route(plan, self.project, self.features)
+            self.criteria = plan["criteria"]
             self.journal.emit("plan.accepted", waves=waves)
             all_paths = [path for task in assignments.values() for path in task["paths"]]
             files = base_files(self.base, all_paths)
@@ -220,8 +224,10 @@ class Engine:
                 sha = make_commit(self.base, changes, self.journal.run_id, round_no)
                 self.journal.emit("qa.started", role="tester", round=round_no, sha=sha)
                 findings = {role: list(handoff["failed_checks"]) for role, handoff in handoffs.items()}
+                evidence = []
                 for check in qa_checks:
                     result = self.check(check, sha, "tester", round_no)
+                    evidence.append(result.data())
                     if result.status == "fail":
                         for role in (set(check.owners) & assignments.keys()) or assignments:
                             findings[role].append({"check": check.name, "diagnostics": result.diagnostics})
@@ -239,11 +245,16 @@ class Engine:
                         raise Blocked("QA вернул неверный SHA или вердикт.")
                     if verdict == "fail":
                         findings = {role: [answer["findings"][:450]] for role in assignments}
+                self.qa_rounds.append({
+                    "sha": sha, "verdict": verdict, "evidence": evidence,
+                    "findings": ", ".join(f"{item['check']}={item['status']}" for item in evidence),
+                })
                 self.journal.emit("qa.finished", role="tester", round=round_no, sha=sha, status=verdict)
                 recheck()
                 if verdict == "pass":
-                    self.candidate(sha)
-                    return self.finish("passed", sha=sha, qa_checks=[check.name for check in qa_checks])
+                    if self.export_candidate:
+                        self.candidate(sha)
+                    return self.finish("passed", sha=sha, round=round_no, qa_checks=[check.name for check in qa_checks])
                 if verdict == "blocked":
                     raise Blocked("Андрюха заблокировал приёмку.")
                 feedback = findings

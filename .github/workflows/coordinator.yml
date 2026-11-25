@@ -35,6 +35,8 @@ concurrency:
 env:
   COORDINATOR_ACTORS: ${{ vars.COORDINATOR_ACTORS }}
   COORDINATOR_PATHS: ${{ vars.COORDINATOR_PATHS }}
+  COORDINATOR_V2_FEATURES: ${{ vars.COORDINATOR_V2_FEATURES }}
+  COORDINATOR_V2_PROJECT: ${{ vars.COORDINATOR_V2_PROJECT }}
   COORDINATOR_USD_PER_MTOK: ${{ vars.COORDINATOR_USD_PER_MTOK }}
   ISSUE: ${{ inputs.issue }}
   REQUEST: ${{ inputs.request }}
@@ -70,6 +72,8 @@ jobs:
       resume: ${{ steps.claim.outputs.resume }}
       attempt: ${{ steps.claim.outputs.attempt }}
       resume_only: ${{ steps.claim.outputs.resume_only }}
+      sandbox: ${{ steps.claim.outputs.sandbox }}
+      route_token: ${{ steps.claim.outputs.route_token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -83,7 +87,7 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.proceed == 'true' && fromJSON(needs.prepare.outputs.attempt || '0') == github.run_attempt
     runs-on: ubuntu-24.04
-    timeout-minutes: 22
+    timeout-minutes: 35
     environment: coordinator-live
     permissions:
       contents: read
@@ -100,21 +104,27 @@ jobs:
           path: ${{ runner.temp }}/coordinator
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
+      - if: needs.prepare.outputs.sandbox == 'true' && needs.prepare.outputs.resume_only != 'true'
+        run: docker build -t coordinator-v2-sandbox:local coordinator_v2/sandbox
       - if: inputs.mode != 'dry-run' && needs.prepare.outputs.resume_only != 'true'
         run: |
           npm install --global --prefix "$RUNNER_TEMP/codex-cli" --no-audit --no-fund --ignore-scripts @openai/codex@0.172.0
           echo "$RUNNER_TEMP/codex-cli/bin" >> "$GITHUB_PATH"
-      - run: python3 -m coordinator run --issue="$ISSUE" --request="$REQUEST" --mode="$MODE" --state="$RUNNER_TEMP/coordinator/state.json"
+      - run: python3 -m coordinator run --issue="$ISSUE" --request="$REQUEST" --mode="$MODE" --state="$RUNNER_TEMP/coordinator/state.json" --journal="$RUNNER_TEMP/coordinator/journal"
         env:
           GH_TOKEN: ${{ github.token }}
           CODEX_API_KEY: ${{ inputs.mode != 'dry-run' && needs.prepare.outputs.resume_only != 'true' && secrets.COORDINATOR_OPENAI_API_KEY || '' }}
           COORDINATOR_MODEL: ${{ vars.COORDINATOR_MODEL }}
           COORDINATOR_RESUME_ONLY: ${{ needs.prepare.outputs.resume_only }}
+          COORDINATOR_ROUTE_TOKEN: ${{ needs.prepare.outputs.route_token }}
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coordinator-state-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/coordinator/state.json
+          path: |
+            ${{ runner.temp }}/coordinator/state.json
+            ${{ runner.temp }}/coordinator/journal/events.jsonl
+            ${{ runner.temp }}/coordinator/journal/summary.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -134,7 +144,16 @@ jobs:
         with:
           name: coordinator-state-${{ needs.prepare.outputs.attempt }}
           path: ${{ runner.temp }}/coordinator
-      - run: python3 -m coordinator publish --issue="$ISSUE" --request="$REQUEST" --mode="$MODE" --state="$RUNNER_TEMP/coordinator/state.json"
+      - run: python3 -m coordinator publish --issue="$ISSUE" --request="$REQUEST" --mode="$MODE" --state="$RUNNER_TEMP/coordinator/state.json" --journal="$RUNNER_TEMP/coordinator/journal"
         env:
           GH_TOKEN: ${{ github.token }}
           COORDINATOR_DRAFT_PR: ${{ vars.COORDINATOR_DRAFT_PR }}
+          COORDINATOR_ROUTE_TOKEN: ${{ needs.prepare.outputs.route_token }}
+
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coordinator-journal-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/coordinator/journal/
+          if-no-files-found: ignore
+          retention-days: 7

@@ -24,6 +24,18 @@ def identity(value, pattern):
     return value
 
 
+# Independently operated components must stay outside every coordinator project.
+def protected_path(path):
+    root = path.split("/", 1)[0]
+    return (
+        root in {"agents", "coordinator", "dashboard", "evaluation", "pilot",
+                 "AGENTS.md", "PROJECT.md", "CODEOWNERS"}
+        or path == "scripts/evaluator" or path.startswith("scripts/evaluator/")
+        or path in {"docs/judge-implementation-report.md", "docs/architecture/evaluator-plan.md",
+                    "tests/test_evaluator.py"}
+    )
+
+
 def git(*args, env=None, data=None):
     try:
         return subprocess.run(

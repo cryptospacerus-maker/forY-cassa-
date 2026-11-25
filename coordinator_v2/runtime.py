@@ -12,7 +12,7 @@ from tempfile import TemporaryDirectory
 import time
 from uuid import uuid4
 
-from coordinator.context import Blocked, git, identity, SHA
+from coordinator.context import Blocked, git, identity, protected_path, SHA
 
 FEATURES = {"execution", "tests", "browser", "mcp"}
 ROLES = {"developer", "interface"}
@@ -46,11 +46,10 @@ class Project:
         identity(name, CHECK_ID)
         data = json.loads(git("show", f"{identity(base, SHA)}:coordinator_v2/projects/{name}.json"))
         source, harness = data["source"], data["harness"]
-        protected = {"agents", "coordinator", "dashboard", "evaluation", "pilot"}
         if (
             not all(SAFE_PATH.fullmatch(path) for path in (source, harness))
             or len(source.split("/")) < 2 or len(harness.split("/")) < 2
-            or source.split("/")[0] in protected or harness.split("/")[0] in protected
+            or protected_path(source) or protected_path(harness)
             or (source.startswith("coordinator_v2/") and source != "coordinator_v2/demo/app")
             or source == harness or source.startswith(harness + "/") or harness.startswith(source + "/")
         ):
@@ -81,7 +80,7 @@ class Project:
         return (
             isinstance(path, str) and len(path) <= 180 and SAFE_PATH.fullmatch(path)
             and path.startswith(self.source + "/")
-            and not path.startswith(("coordinator_v2/projects/", "coordinator_v2/sandbox/"))
+            and not protected_path(path)
             and Path(path).suffix in {".py", ".js", ".css", ".html", ".json", ".md", ".txt"}
         )
 

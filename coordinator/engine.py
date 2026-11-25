@@ -7,15 +7,11 @@ from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
 
-from .context import Blocked, DEMO_PATH, digest, fixture, git, identity, SHA
+from .context import Blocked, DEMO_PATH, digest, fixture, git, identity, protected_path, SHA
 from .runner import PLAN, REVIEW, WORK, Sessions, usage_totals
 
 ROLES = {"developer", "interface"}
 PATH = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*")
-PROTECTED = {
-    "agents", "dashboard", "evaluation", "pilot", "AGENTS.md", "PROJECT.md",
-    "coordinator", "CODEOWNERS",
-}
 TEXT_TYPES = {".md", ".txt", ".json", ".csv", ".html", ".css", ".js", ".ts", ".py"}
 
 
@@ -24,7 +20,8 @@ def allowed_path(path, prefixes, demo):
         return path == DEMO_PATH
     return (
         isinstance(path, str) and len(path) <= 180 and PATH.fullmatch(path)
-        and path.split("/")[0] not in PROTECTED
+        and not protected_path(path)
+        and not path.startswith("coordinator_v2/")
         and Path(path).suffix in TEXT_TYPES
         and any(path.startswith(prefix + "/") for prefix in prefixes)
     )
@@ -170,7 +167,7 @@ def demo_plan(snapshot):
     }
 
 
-def execute(run, snapshot, current, model, prefixes):
+def execute(run, snapshot, current, model, prefixes, *, journal=None):
     state = run.state
     meta = state["meta"]
     base = identity(meta["base"], SHA)
@@ -181,6 +178,8 @@ def execute(run, snapshot, current, model, prefixes):
 
     def recheck():
         if digest(current()) != initial:
+            if journal:
+                journal.emit("requirements.changed")
             raise Blocked("Требования изменились. Создайте новый запуск после сверки.")
 
     shared = {"requirements": fixture() if is_demo else snapshot, "base": base}
@@ -192,7 +191,7 @@ def execute(run, snapshot, current, model, prefixes):
                 inventory.append(path)
                 if len(inventory) == 50:
                     break
-    sessions = Sessions(run, model)
+    sessions = Sessions(run, model, journal=journal)
     try:
         if is_demo:
             plan = demo_plan(snapshot)
@@ -204,6 +203,8 @@ def execute(run, snapshot, current, model, prefixes):
                 dict(shared, allowed_paths=list(prefixes), existing_paths=inventory), PLAN,
             )])
         allocations, waves = plan_tasks(plan, prefixes, is_demo)
+        if journal:
+            journal.emit("plan.accepted", waves=waves)
         all_paths = [path for task in plan["tasks"] for path in task["paths"]]
         initial_files = base_files(base, all_paths)
         state["plan"] = plan
@@ -233,10 +234,16 @@ def execute(run, snapshot, current, model, prefixes):
                     jobs.append((key, role, task["instruction"], payload, WORK))
                 answers = sessions.batch(jobs)
                 for (_, role, *unused), result in zip(jobs, answers, strict=True):
-                    changes.update(validate_files(result, allocations[role]["paths"]))
+                    proposal = validate_files(result, allocations[role]["paths"])
+                    changes.update(proposal)
                     handoffs[role] = result["summary"]
+                    if journal:
+                        journal.emit("task.handoff", role=role, round=round_no, paths=sorted(proposal),
+                                     dependencies=allocations[role]["depends_on"])
             recheck()
             commit = make_commit(base, changes, meta["run_id"], round_no)
+            if journal:
+                journal.emit("qa.started", role="tester", round=round_no, sha=commit)
             deterministic_error = demo_check(commit) if is_demo else ""
             verdict, = sessions.batch([(
                 f"qa-{round_no}", "tester",
@@ -251,6 +258,8 @@ def execute(run, snapshot, current, model, prefixes):
             if verdict["sha"] != commit or verdict["verdict"] not in {"pass", "fail", "blocked"}:
                 raise Blocked("Андрюха не подтвердил проверяемый SHA или вернул некорректный вердикт.")
             result = "fail" if deterministic_error else verdict["verdict"]
+            if journal:
+                journal.emit("qa.finished", role="tester", round=round_no, sha=commit, status=result)
             feedback = (deterministic_error + "\n" + verdict["findings"][:2000]).strip()
             check = {"sha": commit, "verdict": result, "findings": feedback}
             state["checks"] = state["checks"][:round_no - 1] + [check]
@@ -267,6 +276,8 @@ def execute(run, snapshot, current, model, prefixes):
             for wave in waves:
                 repair_roles.update(role for role in wave
                                     if repair_roles.intersection(allocations[role]["depends_on"]))
+            if journal and round_no == 1:
+                journal.emit("repair.requested", roles=sorted(repair_roles), sha=commit)
         run.finish("failed", "После одного исправления проверка всё ещё выявляет дефект.")
     except Blocked as error:
         run.finish("blocked", str(error))

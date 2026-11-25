@@ -13,9 +13,10 @@ from .context import (
     api, Blocked, check_author, comments, digest, fixture, git, identity,
     is_actions, issue_data, LOGIN, REPO, SHA,
 )
-from .engine import allowed_path, demo_check, estimate_usage, execute, make_commit, Run
+from .engine import demo_check, estimate_usage, make_commit, Run
 from .gateway import Gateway
 from .runner import Codex
+from .unified import check_route, execute_route, load_project, open_journal, publication_rules, routing
 
 
 def make_meta(repo, issue, actor, request, mode, base, workflow):
@@ -91,6 +92,7 @@ def prepare(meta):
     if claim and not claim["body"].startswith(marker(meta, "claim")):
         print("Запрос закреплён за предыдущим запуском. Для восстановления повторите его в Actions.")
         return output(proceed="false", resume="", attempt="", resume_only="false")
+    policy = routing(meta["mode"])
     resume = ""
     if claim:
         artifacts = api(
@@ -105,6 +107,8 @@ def prepare(meta):
             resume = f"coordinator-state-{max(candidates)}"
     else:
         verify_main(meta)
+        if policy["engine"] == "v2":
+            load_project(meta["base"], policy)
         issue_data(meta["repo"], meta["issue"], meta["base"], meta["actor"])
         add_comment(meta, f"{marker(meta, 'claim')}\nЗапрос принят. [Запуск GitHub Actions]({run_url(meta)}).")
     resume_only = bool(claim and meta["mode"] != "dry-run")
@@ -112,7 +116,9 @@ def prepare(meta):
         raise Blocked("У платного запроса нет сохранённого состояния. Повтор с тем же ключом остановлен.")
     attempt = identity(os.environ["GITHUB_RUN_ATTEMPT"], re.compile(r"[1-9][0-9]{0,6}"))
     output(proceed="true", resume=resume, attempt=attempt,
-           resume_only="true" if resume_only else "false")
+           resume_only="true" if resume_only else "false",
+           sandbox="true" if set(policy["features"]) - {"mcp"} else "false",
+           route_token=digest(policy))
 
 
 def fresh(meta, use_fixture=False):
@@ -123,42 +129,63 @@ def fresh(meta, use_fixture=False):
     return issue_data(meta["repo"], meta["issue"], meta["base"], meta["actor"])
 
 
+def summarize_journal(journal, state, event, **fields):
+    if journal is None:
+        return
+    last_check = state["checks"][-1] if state["checks"] else {}
+    details = {
+        "base": state["meta"]["base"], "sha": last_check.get("sha"),
+        "routing": state.get("routing"), "model_sessions": len(state["sessions"]),
+        "usage": estimate_usage(state["sessions"])[0], "budget": state.get("budget"),
+        "metrics": state.get("v2"), **fields,
+    }
+    journal.finish(state["status"], event=event, **details)
+
+
 def run_task(args, meta, path, key):
     current = lambda: fresh(meta, args.fixture)
     prefixes = tuple(os.environ.get("COORDINATOR_PATHS", "").split())
     run = Run(path, meta)
+    state = run.state
+    journal = None
     try:
-        snapshot = current()
+        journal = open_journal(args.journal, meta, resume=True)
+        policy = routing(args.mode)
+        check_route(policy)
+        if state.setdefault("routing", policy) != policy:
+            raise Blocked("Настройки маршрута изменились. Нужен новый ключ запроса.")
+        if journal is None and policy["engine"] == "v2":
+            journal = open_journal(path.with_suffix(".journal"), meta, resume=True)
+        if state["status"] == "running":
+            if journal:
+                journal.emit("coordinator.started", routing=policy, base=meta["base"])
+            snapshot = current()
+            initial = digest(snapshot)
+            if state.setdefault("snapshot_hash", initial) != initial:
+                raise Blocked("Требования изменились с момента сохранения состояния.")
+            if args.mode == "dry-run":
+                role = "interface" if re.search(r"экран|интерфейс|frontend|UI\b", snapshot["title"], re.I) else "developer"
+                state["route"] = [role, "tester"]
+                run.finish("dry-run", "Маршрут предварительный. Сессии Codex не запускались.")
+            else:
+                if args.mode == "task" and policy["engine"] == "v1" and not prefixes:
+                    raise Blocked("Для обычных задач V1 задайте COORDINATOR_PATHS.")
+                if state.get("paid_started") or os.environ.get("COORDINATOR_RESUME_ONLY") == "true":
+                    raise Blocked("Платный запуск был прерван. Проверьте расход перед созданием нового ключа.")
+                model = Codex.model_config(key)
+                state["paid_started"] = True
+                run.save()
+                with Gateway(key, model, args.mode) as gateway:
+                    try:
+                        execute_route(run, snapshot, current, Codex(gateway), prefixes, policy, journal)
+                    finally:
+                        state["budget"] = gateway.summary()
+                        run.save()
+            summarize_journal(journal, state, "coordinator.finished")
     except Blocked as error:
         run.finish("blocked", str(error))
-        print(report(run.state))
-        return
-    if run.state["status"] == "running":
-        initial = digest(snapshot)
-        if run.state.setdefault("snapshot_hash", initial) != initial:
-            run.finish("blocked", "Требования изменились с момента сохранения состояния.")
-        else:
-            run.save()
-    if args.mode == "dry-run" and run.state["status"] == "running":
-        role = "interface" if re.search(r"экран|интерфейс|frontend|UI\b", snapshot["title"], re.I) else "developer"
-        run.state["route"] = [role, "tester"]
-        run.finish("dry-run", "Маршрут предварительный. Сессии Codex не запускались.")
-    elif run.state["status"] == "running":
-        try:
-            if args.mode == "task" and not prefixes:
-                raise Blocked("Для обычных задач задайте COORDINATOR_PATHS.")
-            if run.state.get("paid_started") or os.environ.get("COORDINATOR_RESUME_ONLY") == "true":
-                raise Blocked("Платный запуск был прерван. Проверьте расход перед созданием нового ключа.")
-            model = Codex.model_config(key)
-            run.state["paid_started"] = True
-            run.save()
-            with Gateway(key, model, args.mode) as gateway:
-                execute(run, snapshot, current, Codex(gateway), prefixes)
-                run.state["budget"] = gateway.summary()
-                run.save()
-        except Blocked as error:
-            run.finish("blocked", str(error))
-    print(report(run.state))
+        summarize_journal(journal, state, "coordinator.finished")
+    print(report(state))
 
 
 def excerpt(text):
@@ -172,8 +199,11 @@ def report(state, delivery=""):
         "passed": "принято", "failed": "требуется исправление",
         "blocked": "заблокировано", "dry-run": "план без запуска", "running": "в работе",
     }
-    lines = [f"## Coordinator MVP · {statuses[state['status']]}",
+    lines = [f"## Coordinator · {statuses[state['status']]}",
              f"Issue #{meta['issue']} · Run `{meta['run_id']}` · канал GitHub Issue"]
+    if policy := state.get("routing"):
+        features = ", ".join(policy["features"])
+        lines.append(f"Маршрут {policy['engine'].upper()}" + (f" · {features}" if features else ""))
     if state.get("plan"):
         lines.append("Критерии приёмки")
         lines.extend(f"- {excerpt(item)}" for item in state["plan"]["criteria"])
@@ -207,9 +237,14 @@ def report(state, delivery=""):
 
 def push_result(meta, state):
     prefixes = tuple(os.environ.get("COORDINATOR_PATHS", "").split())
+    policy = routing(meta["mode"])
+    check_route(policy)
+    if state.get("routing", policy) != policy or ("routing" not in state and policy["engine"] == "v2"):
+        raise Blocked("Настройки публикации отличаются от настроек запуска.")
+    allowed, expected = publication_rules(state, policy, prefixes)
     changes = state["changes"]
     if not changes or len(changes) > 8 or not all(
-        allowed_path(path, prefixes, meta["mode"] == "demo")
+        allowed(path)
         and isinstance(value, str) and "\0" not in value and len(value.encode()) <= 12000
         for path, value in changes.items()
     ):
@@ -217,6 +252,13 @@ def push_result(meta, state):
     commit = make_commit(meta["base"], changes, meta["run_id"], state["round"])
     if commit != state["checks"][-1]["sha"] or state["checks"][-1]["verdict"] != "pass":
         raise Blocked("Публикуемый коммит отличается от принятой Андрюхой версии.")
+    if expected is not None:
+        evidence = state["checks"][-1].get("evidence", [])
+        if (
+            len(evidence) != len(expected) or {item["check"] for item in evidence} != expected
+            or any(item["sha"] != commit or item["status"] != "pass" for item in evidence)
+        ):
+            raise Blocked("Для проверенного SHA отсутствуют обязательные результаты QA.")
     if meta["mode"] == "demo" and demo_check(commit):
         raise Blocked("Публикуемый коммит не проходит проверку контрольного примера.")
     branch = f"coordinator/result-{meta['issue']}-{meta['key']}"
@@ -240,13 +282,16 @@ def push_result(meta, state):
             delivery += f" · [PR с результатом]({pr['html_url']})"
         except Blocked:
             delivery += ". GitHub не позволил открыть черновик PR."
-    return delivery
+    return delivery, commit
 
 
-def publish(meta, path):
+def publish(meta, path, journal_path=None):
     check_author(meta["repo"], meta["actor"])
     items = reservations(meta)
     if previous_report(items, meta):
+        journal = open_journal(journal_path, meta, resume=True)
+        if journal:
+            journal.emit("publication.skipped", notification="already-posted")
         return
     if not any((item.get("body") or "").split("\n", 1)[0] == marker(meta, "claim") for item in items):
         raise Blocked("У запуска нет подтверждённой записи о начале работы.")
@@ -255,7 +300,9 @@ def publish(meta, path):
     state = Run(path, meta).state
     if state["status"] == "running":
         raise Blocked("Запуск прерван. Повторите его в Actions для восстановления.")
-    delivery = f"[Журнал запуска]({run_url(meta)})"
+    journal = open_journal(journal_path, meta, resume=True)
+    delivery = f"[Журнал запуска и артефакты]({run_url(meta)})"
+    published_sha = None
     if state["status"] == "passed":
         try:
             unchanged = digest(fresh(meta)) == state["snapshot_hash"]
@@ -263,12 +310,18 @@ def publish(meta, path):
             unchanged = False
         if unchanged:
             try:
-                delivery += " · " + push_result(meta, state)
+                link, published_sha = push_result(meta, state)
+                delivery += " · " + link
             except Blocked as error:
                 state.update(status="blocked", reason=f"Публикация результата: {error}")
         else:
             state.update(status="blocked", reason="Требования обновились перед публикацией.")
-    add_comment(meta, f"{marker(meta, 'report')}\n@{meta['actor']}\n\n{report(state, delivery)}")
+    try:
+        add_comment(meta, f"{marker(meta, 'report')}\n@{meta['actor']}\n\n{report(state, delivery)}")
+    except Blocked:
+        summarize_journal(journal, state, "publication.failed", published_sha=published_sha, notification="failed")
+        raise
+    summarize_journal(journal, state, "publication.finished", published_sha=published_sha, notification="issue-comment")
 
 
 def parser():
@@ -281,6 +334,7 @@ def parser():
     result.add_argument("--mode", choices=("dry-run", "demo", "task"), default="dry-run")
     result.add_argument("--fixture", action="store_true")
     result.add_argument("--state", type=Path)
+    result.add_argument("--journal", type=Path)
     return result
 
 
@@ -296,7 +350,7 @@ def main():
             if args.operation == "prepare":
                 prepare(meta)
             else:
-                publish(meta, args.state)
+                publish(meta, args.state, args.journal)
             return 0
         if args.fixture and (
             args.mode == "task"
