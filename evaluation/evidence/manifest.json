@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "pilot-contract",
+      "path": "pilot/yookassa-mcp-lab/CONTRACT.md",
+      "kind": "requirements",
+      "source_sha": "target"
+    },
+    {
+      "id": "project-requirements",
+      "path": "PROJECT.md",
+      "kind": "requirements",
+      "source_sha": "target"
+    },
+    {
+      "id": "workspace-overview",
+      "path": "README.md",
+      "kind": "docs",
+      "source_sha": "target"
+    }
+  ]
+}
