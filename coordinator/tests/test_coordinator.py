@@ -217,6 +217,21 @@ class GitHubTest(unittest.TestCase):
             cli.publish(self.meta, path)
         comment.assert_called_once()
 
+    @patch("coordinator.context.subprocess.run")
+    def test_github_api_parses_paginated_arrays(self, call):
+        call.return_value = subprocess.CompletedProcess([], 0, stdout='[{"id":1}][{"id":2}]')
+        from coordinator.context import comments
+        self.assertEqual(comments("owner/repo", 12), [{"id": 1}, {"id": 2}])
+
+    @patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_ACTOR": "ci[bot]"})
+    def test_ci_fixture_dry_run_needs_no_credentials(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            args = ["coordinator", "run", "--issue", "13", "--fixture", "--state", str(path)]
+            with patch("sys.argv", args):
+                self.assertEqual(cli.main(), 0)
+            self.assertEqual(json.loads(path.read_text())["status"], "dry-run")
+
     @patch.dict(os.environ, {"COORDINATOR_ACTORS": "alice,bob"})
     @patch("coordinator.context.api")
     def test_authorization_checks_allowlist_and_github_permission(self, api):

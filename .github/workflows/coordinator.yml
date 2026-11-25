@@ -49,9 +49,7 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -m unittest discover -s coordinator/tests -v
-      - run: python3 -m coordinator run --issue 12 --fixture --mode dry-run
-        env:
-          GITHUB_ACTIONS: 'false'
+      - run: python3 -m coordinator run --issue 13 --fixture --mode dry-run
 
   prepare:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'

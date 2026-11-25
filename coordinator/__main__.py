@@ -20,7 +20,7 @@ from .runner import Codex
 def request_meta(args):
     if args.issue < 1:
         raise Blocked("Номер Issue должен быть положительным.")
-    actor = identity(os.environ.get("GITHUB_ACTOR", args.actor), LOGIN)
+    actor = identity("local" if args.fixture else os.environ.get("GITHUB_ACTOR", args.actor), LOGIN)
     repo = identity(args.repo, REPO)
     request = identity(args.request, re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,39}"))
     base = identity(git("rev-parse", "HEAD").decode().strip(), SHA)
@@ -261,7 +261,10 @@ def main():
             else:
                 publish(meta, args.state)
             return 0
-        if args.fixture and (args.mode == "task" or os.environ.get("GITHUB_ACTIONS") == "true"):
+        if args.fixture and (
+            args.mode == "task"
+            or (args.mode == "demo" and os.environ.get("GITHUB_ACTIONS") == "true")
+        ):
             raise Blocked("Локальный пример поддерживает режимы dry-run и demo.")
         if not args.fixture:
             check_author(meta["repo"], meta["actor"])
