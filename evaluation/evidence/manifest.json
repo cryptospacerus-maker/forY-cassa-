@@ -1,0 +1,6 @@
+{
+  "items": [
+    {"id":"project", "path":"PROJECT.md", "kind":"requirements", "source_sha":"target"},
+    {"id":"readme", "path":"README.md", "kind":"documentation", "source_sha":"target"}
+  ]
+}

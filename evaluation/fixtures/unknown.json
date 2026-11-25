@@ -1,0 +1,167 @@
+{
+  "summary": "Контрольный ответ для проверки инфраструктуры, не оценка проекта.",
+  "criteria": [
+    {
+      "id": "B1",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "B2",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "B3",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "B4",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "B5",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "B6",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "B7",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "T1",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "T2",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "T3",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "T4",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "T5",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "A1",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "A2",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "A3",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "P1",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "P2",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "P3",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "C1",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "C2",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "C3",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    },
+    {
+      "id": "C4",
+      "score": null,
+      "evidence_ids": [],
+      "reason": "Недостаточно доказательств",
+      "improvement": "Предоставить материалы"
+    }
+  ],
+  "blockers": [],
+  "improvements": [],
+  "questions": [
+    "Как измерена польза?"
+  ],
+  "limitations": [
+    "Синтетический ответ; модель не вызывалась."
+  ]
+}
