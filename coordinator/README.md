@@ -12,13 +12,13 @@
 
 ## Настройка GitHub
 
-1. После согласованного слияния нужной версии проверьте наличие `coordinator.yml` и `coordinator-notify.yml` в `main`. Для V2 сначала принимается V1, затем PR с интеграцией. Включите правила защиты `main` согласно процессу команды.
-2. В [Settings → Environments](https://github.com/cryptospacerus-maker/forY-cassa-/settings/environments) создайте `coordinator-live`. В **Selected branches and tags** оставьте только ветку `main`. Добавьте секрет `COORDINATOR_OPENAI_API_KEY` на уровне окружения. Для dry-run ключ не используется. API оплачивается в отдельном API-проекте по его тарифам. [Авторизация Codex](https://learn.chatgpt.com/docs/auth)
+1. V1 уже находится в `main` после PR #14. Убедитесь, что в `main` доступны `coordinator.yml` и `coordinator-notify.yml`. Живую приёмку V2 проводите после независимого ревью и согласованного слияния PR #16.
+2. В [Settings → Environments](https://github.com/cryptospacerus-maker/forY-cassa-/settings/environments) откройте существующее `coordinator-live`. Перед подключением ключа администратор устанавливает **Selected branches and tags**, оставляет только ветку `main` и проверяет защиту этой ветки. Убедитесь, что `COORDINATOR_OPENAI_API_KEY` размещён только в этом окружении. Если доступа к настройкам нет, остановитесь на бесплатной приёмке. Dry-run ключ не использует. [Авторизация Codex](https://learn.chatgpt.com/docs/auth)
 3. В [Settings → Secrets and variables → Actions → Variables](https://github.com/cryptospacerus-maker/forY-cassa-/settings/variables/actions) задайте параметры:
 
 | Переменная | Настройка |
 | --- | --- |
-| `COORDINATOR_ACTORS` | `greatsoutherntrendkill tolyapolya2006-png`. Оба логина также должны иметь право записи в GitHub. |
+| `COORDINATOR_ACTORS` | Переменная **репозитория**, поскольку её читает `prepare` до работы с окружением. Значение `greatsoutherntrendkill tolyapolya2006-png`. Оба логина должны иметь право записи в GitHub. |
 | `COORDINATOR_MODEL` | Совместимая с Responses API модель. Для первого согласованного demo можно взять `gpt-5.4-mini`, если она доступна проекту. |
 | `COORDINATOR_USD_PER_MTOK` | Опциональные тарифы в USD за миллион токенов в порядке вход, кэшированный вход, выход. Сверьте действующие тарифы модели. |
 | `COORDINATOR_PATHS` | Для обычного `task` V1: разрешённые каталоги через пробел. |
@@ -28,23 +28,19 @@
 
 Для V2 `execution` разрешает рабочим ролям выбрать проверки из профиля, `tests` делает обязательными автоматические тесты Андрюхи, `browser` добавляет обязательные браузерные проверки, а `mcp` разрешает запросы к встроенному синтетическому провайдеру. Профиль и проверки берутся из доверенного базового SHA. Внешние MCP-серверы и реальные платёжные данные в первом прогоне не используются. [Профиль lab](../coordinator_v2/projects/lab.json)
 
-## Первый запуск из Codex
+## Пошаговая живая приёмка V1 и V2
 
-В сессии Семёна или Толи дайте команду:
+1. В нужной сессии Codex проверьте аккаунт командой `gh api user --jq .login`. На V1 повтор Толи уже проверен. Семён может выполнить бесплатный запуск для своего логина. Не запускайте дополнительную проверку от имени другого участника.
 
-> Запусти Coordinator для Issue #13 в cryptospacerus-maker/forY-cassa- в режиме dry-run с ключом pilot-check-1 от моего GitHub-аккаунта. Покажи логин и ссылку на запуск.
+   ```sh
+   gh workflow run coordinator.yml -R cryptospacerus-maker/forY-cassa- \
+     --ref main -f issue=13 -f request=pilot-check-1 -f mode=dry-run
+   ```
 
-Проверка учётной записи и форма запуска общие для всех режимов. Для действий в GitHub нужен авторизованный `gh`.
-
-```sh
-gh api user --jq .login
-gh workflow run coordinator.yml -R cryptospacerus-maker/forY-cassa- \
-  --ref main -f issue=13 -f request=pilot-check-1 -f mode=dry-run
-```
-
-1. Семён и Толя выполняют dry-run каждый под своим логином. В Issue #13 должно появиться по одному отчёту с правильным упоминанием и нулём сессий. Повторите команду с теми же Issue, режимом и ключом от одного логина. Он должен получить ссылку на существующий результат без повторной работы. [Issue #13](https://github.com/cryptospacerus-maker/forY-cassa-/issues/13)
-2. После разрешения платного запуска один участник повторяет форму команды с `mode=demo` и новым ключом `pilot-live-1`. Проверьте итог в Issue, точный SHA, расход и файл `coordinator/demo/output/topic-counts.json`. Ожидаемый результат — доставка 2, оплата 1, возврат 1.
-3. Для отдельной приёмки интеграции согласуйте расход, включите нужные флаги V2 и запустите ту же команду с `issue=18`, `mode=task` и новым ключом, например `integration-live-1`. При включённых `tests browser` в отчёте должны быть результаты обеих проверок на опубликованном SHA. В артефактах ищите `coordinator-journal-<попытка>`. [Контрольная карточка V2](https://github.com/cryptospacerus-maker/forY-cassa-/issues/18)
+2. Проверьте в Actions, что `prepare`, `coordinate` и `publish` завершились успешно. В Issue #13 должен быть один итог с упоминанием инициатора, нулём сессий и нулём токенов. При повторе с теми же Issue, режимом, ключом и логином `prepare` сообщает «У запроса уже есть итоговый отчёт», а `coordinate` и `publish` пропускаются. Прежний отчёт остаётся в Issue. Если первый запуск завершился в `prepare` до принятия заявки, проверьте переменную репозитория `COORDINATOR_ACTORS`, логин и право записи. После исправления можно повторить dispatch с тем же ключом. [Подтверждённый отчёт Толи](https://github.com/cryptospacerus-maker/forY-cassa-/issues/13#issuecomment-7159362208)
+3. Для платного V1 demo дождитесь отдельного согласования расхода и проверки настроек окружения. Установите доступную API-проекту модель. Запустите одну попытку для Issue #13 с новым ключом `pilot-live-1` и `mode=demo`. Ожидаются две генерации при успехе с первого раза, итоговый комментарий, ветка и точный SHA. Проверьте `coordinator/demo/output/topic-counts.json` в этом SHA. Ожидаемые значения — доставка 2, оплата 1, возврат 1.
+4. После согласованного слияния PR #16 выполните аналогичный бесплатный dry-run для Issue #18 с новым ключом. Проверьте отчёт, упоминание и артефакт `coordinator-journal-<попытка>`. Dry-run проверяет GitHub-маршрут. Исполнение V2, Playwright и MCP отдельно подтверждаются бесплатным CI с синтетическими ответами. [Карточка V2](https://github.com/cryptospacerus-maker/forY-cassa-/issues/18)
+5. Для платной приёмки V2 получите отдельное согласование. Выберите профиль `lab`, нужные флаги и запустите Issue #18 с `mode=task` и новым ключом `integration-live-1`. Для полного сценария включите `execution tests browser mcp`. Проверьте тот же SHA в доказательствах Python и Playwright, в опубликованной ветке и в `publication.finished.published_sha`. Сверьте упоминание, фактический расход и итоговый журнал. При сбое после принятия заявки изучите исходный запуск и его артефакт до решения о повторе.
 
 Для репетиции без ключей используется пакет `coordinator_v2` с синтетическими ответами ролей. Тест общей цепочки `prepare → run → publish` входит в CI и выполняет реальные Docker, Chromium и MCP stdio. GitHub API и ответы моделей в этом тесте заменены сценариями, Git-публикация идёт в настоящий локальный bare-репозиторий. [Локальный запуск без ключей](../coordinator_v2/README.md)
 
