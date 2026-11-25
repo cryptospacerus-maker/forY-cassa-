@@ -42,6 +42,8 @@ const assert = require('node:assert/strict');
     assert.deepEqual(await list.allTextContents(), ['pencil', 'paper', 'cup']);
     await category.selectOption('office');
     assert.deepEqual(await list.allTextContents(), ['pencil', 'paper']);
+    await category.selectOption('kitchen');
+    assert.deepEqual(await list.allTextContents(), ['cup']);
     await category.selectOption('outdoor');
     assert.equal(await list.count(), 0);
     assert.equal(await page.getByRole('status', { name: '' }).textContent(), 'No items');

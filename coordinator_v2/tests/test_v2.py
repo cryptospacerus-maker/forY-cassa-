@@ -107,6 +107,38 @@ class RunTest(unittest.TestCase):
         self.assertEqual(next(item["waves"] for item in events if item["event"] == "plan.accepted"),
                          [["developer"], ["interface"]])
 
+    def test_qa_receives_comment_linked_and_project_requirements(self):
+        snapshot = dict(demo_fixture.SNAPSHOT,
+                        comments=[{"body": "Comment acceptance requirement"}],
+                        linked=[{"number": 18, "title": "Linked task", "body": "Linked requirement"}],
+                        project={"PROJECT.md": "Project acceptance requirement"})
+
+        def agent(role, instruction, payload, contract):
+            if role == "tester":
+                self.assertEqual(payload["requirements"]["comments"], ["Comment acceptance requirement"])
+                self.assertEqual(payload["requirements"]["linked"][0]["number"], 18)
+                self.assertEqual(payload["requirements"]["project"], snapshot["project"])
+            return demo_fixture.model(role, instruction, payload, contract)
+
+        engine = Engine(self.base, self.project, set(), None, agent, self.journal)
+        result = engine.run(snapshot, lambda: snapshot, demo_fixture.plan("parallel"))
+        self.assertEqual(result["status"], "passed", result)
+
+    def test_model_qa_findings_survive_in_reported_checks(self):
+        finding = "The implementation does not satisfy the comment requirement."
+
+        def agent(role, instruction, payload, contract):
+            if role == "tester":
+                return {"answer": {"sha": payload["sha"], "verdict": "fail", "findings": finding}}
+            return demo_fixture.model(role, instruction, payload, contract)
+
+        engine = Engine(self.base, self.project, set(), None, agent, self.journal)
+        result = engine.run(demo_fixture.SNAPSHOT, lambda: demo_fixture.SNAPSHOT,
+                            demo_fixture.plan("parallel"))
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(len(engine.qa_rounds), 2)
+        self.assertTrue(all(finding in check["findings"] for check in engine.qa_rounds))
+
     def test_stale_requirements_stop_qa_and_artifact(self):
         counter = 0
 
@@ -168,6 +200,33 @@ class ActualDockerTest(unittest.TestCase):
         self.base = git("rev-parse", "HEAD").decode().strip()
         self.project = Project.load(self.base, "lab")
         self.sandbox = DockerSandbox(os.environ["COORDINATOR_V2_TEST_IMAGE"], self.project, self.base)
+
+    def test_dependency_rechecks_interface_after_developer_repair(self):
+        received = []
+
+        def agent(role, instruction, payload, contract):
+            if role == "interface":
+                previous = payload["dependencies"]["developer"]
+                received.append(previous["excerpts"]["coordinator_v2/demo/app/store.py"])
+            return demo_fixture.model(role, instruction, payload, contract)
+
+        with TemporaryDirectory() as work:
+            journal = Journal(Path(work) / "dependency")
+            engine = Engine(self.base, self.project, {"execution", "tests", "browser", "mcp"},
+                            self.sandbox, agent, journal)
+            summary = engine.run(demo_fixture.SNAPSHOT, lambda: demo_fixture.SNAPSHOT,
+                                 demo_fixture.plan("dependency"))
+            self.assertEqual(summary["status"], "passed", summary)
+            self.assertEqual(summary["model_sessions"], 5)
+            self.assertEqual(len(received), 2)
+            self.assertIn('category == "unknown"', received[0])
+            self.assertNotIn('category == "unknown"', received[1])
+            self.assertEqual([check["verdict"] for check in engine.qa_rounds], ["fail", "pass"])
+            self.assertTrue(all(item["sha"] == summary["sha"] and item["status"] == "pass"
+                                for item in engine.qa_rounds[-1]["evidence"]))
+            events = [json.loads(line) for line in journal.events.read_text().splitlines()]
+            repair = next(row for row in events if row["event"] == "repair.requested")
+            self.assertEqual(repair["roles"], ["developer", "interface"])
 
     def test_untrusted_process_timeout_is_bounded_and_container_is_removed(self):
         check = Check("timeout-probe", "execution", ("developer",),

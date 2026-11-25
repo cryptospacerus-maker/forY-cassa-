@@ -225,6 +225,7 @@ class Engine:
                 self.journal.emit("qa.started", role="tester", round=round_no, sha=sha)
                 findings = {role: list(handoff["failed_checks"]) for role, handoff in handoffs.items()}
                 evidence = []
+                review_findings = ""
                 for check in qa_checks:
                     result = self.check(check, sha, "tester", round_no)
                     evidence.append(result.data())
@@ -237,17 +238,21 @@ class Engine:
                 else:
                     answer = self.invoke("tester", "Независимо сверь критерии и проверенный SHA.", {
                         "sha": sha, "criteria": plan["criteria"], "files": base_files(sha, all_paths),
-                        "requirements": {key: requirements[key] for key in ("title", "body")},
+                        "requirements": requirements,
                         "checks_passed": [check.name for check in qa_checks],
                     }, REVIEW, round_no)
                     verdict = answer["verdict"]
                     if answer["sha"] != sha or verdict not in {"pass", "fail", "blocked"}:
                         raise Blocked("QA вернул неверный SHA или вердикт.")
+                    review_findings = answer["findings"][:2000]
                     if verdict == "fail":
                         findings = {role: [answer["findings"][:450]] for role in assignments}
                 self.qa_rounds.append({
                     "sha": sha, "verdict": verdict, "evidence": evidence,
-                    "findings": ", ".join(f"{item['check']}={item['status']}" for item in evidence),
+                    "findings": "\n".join(part for part in (
+                        ", ".join(f"{item['check']}={item['status']}" for item in evidence),
+                        review_findings,
+                    ) if part),
                 })
                 self.journal.emit("qa.finished", role="tester", round=round_no, sha=sha, status=verdict)
                 recheck()

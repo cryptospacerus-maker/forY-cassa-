@@ -17,6 +17,9 @@ class InventoryTest(unittest.TestCase):
     def test_filters_to_selected_category(self):
         self.assertEqual(self.query(self.items, "office"), self.items[:1])
 
+    def test_all_returns_the_entire_catalog(self):
+        self.assertEqual(self.query(self.items, "all"), self.items)
+
     def test_returns_no_items_for_unknown_category(self):
         self.assertEqual(self.query(self.items, "unknown"), [])
 
