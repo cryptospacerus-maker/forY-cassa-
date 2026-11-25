@@ -1,0 +1,10 @@
+{
+  "source": "coordinator_v2/demo/app",
+  "harness": "coordinator_v2/demo/harness",
+  "checks": {
+    "worker-python": {"feature":"execution","roles":["developer"],"argv":["python3","-B","/harness/worker.py"],"timeout":10},
+    "worker-browser-assets": {"feature":"execution","roles":["interface"],"argv":["node","--check","/case/client.js"],"timeout":10},
+    "qa-unit": {"feature":"tests","repair":["developer"],"roles":["tester"],"argv":["python3","-B","-m","unittest","discover","-s","/harness","-p","test_inventory.py","-v"],"timeout":20},
+    "qa-browser": {"feature":"browser","repair":["interface"],"roles":["tester"],"argv":["node","/harness/browser.cjs"],"timeout":50}
+  }
+}

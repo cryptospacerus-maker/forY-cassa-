@@ -1,0 +1,63 @@
+name: Coordinator V2
+on:
+  push:
+    branches: [feature/coordinator-v2]
+    paths: [coordinator_v2/**, .github/workflows/coordinator-v2.yml]
+  pull_request:
+    paths: [coordinator_v2/**, .github/workflows/coordinator-v2.yml]
+  workflow_dispatch:
+    inputs:
+      execution:
+        description: Run worker sandbox checks
+        type: boolean
+        default: false
+      tests:
+        description: Run automated QA tests
+        type: boolean
+        default: false
+      browser:
+        description: Run Playwright scenarios
+        type: boolean
+        default: false
+      mcp:
+        description: Connect the synthetic MCP provider
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - if: github.event_name != 'workflow_dispatch' || inputs.execution || inputs.tests || inputs.browser
+        run: docker build -t coordinator-v2-sandbox:local coordinator_v2/sandbox
+      - if: github.event_name != 'workflow_dispatch'
+        env:
+          COORDINATOR_V2_TEST_IMAGE: coordinator-v2-sandbox:local
+        run: python3 -m unittest discover -s coordinator_v2/tests -v
+      - run: |
+          features=()
+          for key in EXECUTION TESTS BROWSER MCP; do
+            if [[ "$GITHUB_EVENT_NAME" != 'workflow_dispatch' || "${!key}" == 'true' ]]; then
+              features+=(--enable "${key,,}")
+            fi
+          done
+          python3 -m coordinator_v2 --output "$RUNNER_TEMP/v2-results" "${features[@]}"
+        env:
+          EXECUTION: ${{ inputs.execution }}
+          TESTS: ${{ inputs.tests }}
+          BROWSER: ${{ inputs.browser }}
+          MCP: ${{ inputs.mcp }}
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coordinator-v2-fixture
+          path: ${{ runner.temp }}/v2-results/
+          if-no-files-found: ignore
+          retention-days: 7
