@@ -39,20 +39,24 @@ REVIEW = schema({
 
 
 class Codex:
-    def __init__(self):
-        self.key = os.environ.get("CODEX_API_KEY")
-        self.model = os.environ.get("COORDINATOR_MODEL", "")
-        if not self.key or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}", self.model):
+    def __init__(self, gateway):
+        self.gateway = gateway
+
+    @staticmethod
+    def model_config(key):
+        model = os.environ.get("COORDINATOR_MODEL", "")
+        if not key or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}", model):
             raise Blocked("Для Codex нужны CODEX_API_KEY и COORDINATOR_MODEL.")
+        return model
 
     def __call__(self, role, instruction, payload, contract):
-        with TemporaryDirectory(prefix=f"coordinator-{role}-") as directory:
+        with self.gateway.ticket() as ticket, TemporaryDirectory(prefix=f"coordinator-{role}-") as directory:
             work = Path(directory)
             (work / "home").mkdir()
             (work / "schema.json").write_text(json.dumps(contract))
             env = {
                 "PATH": os.environ["PATH"], "HOME": str(work / "home"),
-                "CODEX_HOME": str(work / "home"), "CODEX_API_KEY": self.key,
+                "CODEX_HOME": str(work / "home"), "COORDINATOR_PROXY_TOKEN": ticket.token,
             }
             command = [
                 "codex", "exec", "--skip-git-repo-check", "--ephemeral",
@@ -63,7 +67,11 @@ class Codex:
                 "--disable", "view_image", "--disable", "image_generation", "--disable", "goals",
                 "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
                 "-c", 'model_reasoning_effort="low"',
-                "--model", self.model, "--json", "--output-schema", str(work / "schema.json"),
+                "-c", 'model_provider="coordinator"',
+                "-c", f'model_providers.coordinator={{name="Coordinator",base_url="{self.gateway.url}",'
+                      'wire_api="responses",env_key="COORDINATOR_PROXY_TOKEN",'
+                      'request_max_retries=0,stream_max_retries=0}',
+                "--model", self.gateway.model, "--json", "--output-schema", str(work / "schema.json"),
                 "--output-last-message", str(work / "answer.json"), "-",
             ]
             data = (
@@ -78,6 +86,8 @@ class Codex:
                     command, input=data, text=True, cwd=work, env=env, capture_output=True,
                     timeout=120,
                 )
+                if ticket.error:
+                    return {"error": ticket.error}
                 events = [json.loads(line) for line in result.stdout.splitlines()]
                 if any(
                     event.get("item", {}).get("type") in {
@@ -108,9 +118,6 @@ class Sessions:
         pending = [job for job in jobs if job[0] not in cached]
         if len(cached) + len(pending) > 8:
             raise Blocked("Исчерпан лимит из восьми сессий.")
-        totals = usage_totals(cached)
-        if pending and totals["input_tokens"] + totals["output_tokens"] >= 180_000:
-            raise Blocked("Достигнут порог учтённых токенов.")
         if pending:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 futures = [(key, pool.submit(self.model, *args)) for key, *args in pending]

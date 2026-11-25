@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
 
-from .context import Blocked, DEMO_PATH, digest, git, identity, SHA
+from .context import Blocked, DEMO_PATH, digest, fixture, git, identity, SHA
 from .runner import PLAN, REVIEW, WORK, Sessions, usage_totals
 
 ROLES = {"developer", "interface"}
@@ -153,6 +153,23 @@ class Run:
         self.save()
 
 
+def demo_plan(snapshot):
+    example = fixture()
+    if any(snapshot[field] != example[field] for field in ("title", "body")):
+        raise Blocked("Для demo требуется неизменённое описание контрольного примера #13.")
+    return {
+        "blocker": "",
+        "criteria": [
+            "Сгруппировать обращения по темам, учитывая каждый идентификатор один раз.",
+            "Вернуть JSON с целыми значениями и без отсутствующих тем.",
+        ],
+        "tasks": [{
+            "role": "developer", "instruction": "Запиши сводку по синтетическим данным.",
+            "paths": [DEMO_PATH], "depends_on": [],
+        }],
+    }
+
+
 def execute(run, snapshot, current, model, prefixes):
     state = run.state
     meta = state["meta"]
@@ -166,7 +183,7 @@ def execute(run, snapshot, current, model, prefixes):
         if digest(current()) != initial:
             raise Blocked("Требования изменились. Создайте новый запуск после сверки.")
 
-    shared = {"requirements": snapshot, "base": base}
+    shared = {"requirements": fixture() if is_demo else snapshot, "base": base}
     inventory = []
     if not is_demo:
         for raw in git("ls-tree", "-r", "-z", "--name-only", base, "--", *prefixes).split(b"\0"):
@@ -177,13 +194,15 @@ def execute(run, snapshot, current, model, prefixes):
                     break
     sessions = Sessions(run, model)
     try:
-        plan, = sessions.batch([(
-            "plan", "analyst",
-            "Составь проверяемые критерии и план для developer/interface. Укажи пути в разрешённой "
-            "области. depends_on — список ролей-предшественников. Если нельзя составить план, заполни blocker.",
-            dict(shared, allowed_paths=[DEMO_PATH] if is_demo else list(prefixes),
-                 existing_paths=inventory), PLAN,
-        )])
+        if is_demo:
+            plan = demo_plan(snapshot)
+        else:
+            plan, = sessions.batch([(
+                "plan", "analyst",
+                "Составь критерии и план для developer/interface в разрешённой области. "
+                "depends_on — список ролей-предшественников. При блокировке заполни blocker.",
+                dict(shared, allowed_paths=list(prefixes), existing_paths=inventory), PLAN,
+            )])
         allocations, waves = plan_tasks(plan, prefixes, is_demo)
         all_paths = [path for task in plan["tasks"] for path in task["paths"]]
         initial_files = base_files(base, all_paths)

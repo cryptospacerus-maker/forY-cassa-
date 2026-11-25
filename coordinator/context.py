@@ -70,10 +70,10 @@ def is_actions(comment):
     return comment["user"]["login"] == "github-actions[bot]" and comment["user"]["type"] == "Bot"
 
 
-def clean_comments(items):
+def clean_comments(items, actor):
     return [
         {"author": item["user"]["login"], "body": (item.get("body") or "")[:2000]}
-        for item in items if not is_actions(item)
+        for item in items if item["user"]["login"].lower() == actor.lower() and not is_actions(item)
     ][-12:]
 
 
@@ -87,7 +87,7 @@ def check_author(repo, actor):
         raise Blocked("Инициатору нужны права записи в репозиторий.")
 
 
-def issue_data(repo, number, base):
+def issue_data(repo, number, base, actor):
     issue = api(repo, f"issues/{number}")
     if "pull_request" in issue or issue["state"] != "open":
         raise Blocked("Для запуска нужен открытый Issue, карточки PR не поддерживаются.")
@@ -101,11 +101,11 @@ def issue_data(repo, number, base):
         linked.append({
             "number": ref, "title": related["title"], "state": related["state"],
             "body": (related.get("body") or "")[:3000],
-            "comments": clean_comments(comments(repo, ref))[-4:],
+            "comments": clean_comments(comments(repo, ref), actor)[-4:],
         })
     return {
         "number": number, "title": issue["title"], "body": body,
-        "comments": clean_comments(comments(repo, number)), "linked": linked,
+        "comments": clean_comments(comments(repo, number), actor), "linked": linked,
         "project": {
             name: git("show", f"{identity(base, SHA)}:{name}").decode()[:8000]
             for name in ("AGENTS.md", "PROJECT.md")
@@ -122,4 +122,7 @@ def fixture():
 
 
 def profiles(role):
-    return (ROOT / "coordinator/profiles" / f"{role}.md").read_text()
+    agents = ROOT / "agents"
+    general, roles = (agents / "protocol.md").read_text().split("## Роль ", maxsplit=1)
+    role_sections = dict(section.split("\n", maxsplit=1) for section in roles.split("\n## Роль "))
+    return f"{(agents / f'{role}.md').read_text()}\n{general}\n{role_sections[role]}"

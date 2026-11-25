@@ -14,25 +14,32 @@ from .context import (
     is_actions, issue_data, LOGIN, REPO, SHA,
 )
 from .engine import allowed_path, demo_check, estimate_usage, execute, make_commit, Run
+from .gateway import Gateway
 from .runner import Codex
 
 
-def request_meta(args):
-    if args.issue < 1:
+def make_meta(repo, issue, actor, request, mode, base, workflow):
+    if not 1 <= issue <= 999_999_999:
         raise Blocked("Номер Issue должен быть положительным.")
-    actor = identity("local" if args.fixture else os.environ.get("GITHUB_ACTOR", args.actor), LOGIN)
-    repo = identity(args.repo, REPO)
-    request = identity(args.request, re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,39}"))
-    base = identity(git("rev-parse", "HEAD").decode().strip(), SHA)
-    key = digest([repo.lower(), args.issue, actor.lower(), request, args.mode])[:24]
-    workflow = os.environ.get("GITHUB_RUN_ID", "local")
+    identity(actor, LOGIN)
+    identity(repo, REPO)
+    identity(request, re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,39}"))
+    identity(base, SHA)
     identity(workflow, re.compile(r"local|[1-9][0-9]{0,19}"))
+    key = digest([repo.lower(), issue, actor.lower(), request, mode])[:24]
     return {
-        "issue": args.issue, "actor": actor, "repo": repo,
-        "request": request, "mode": args.mode, "base": base,
+        "issue": issue, "actor": actor, "repo": repo,
+        "request": request, "mode": mode, "base": base,
         "run_id": f"{workflow}-{key}", "key": key, "channel": "github-issue",
         "workflow": workflow,
     }
+
+
+def request_meta(args):
+    actor = "local" if args.fixture else os.environ.get("GITHUB_ACTOR", args.actor)
+    base = git("rev-parse", "HEAD").decode().strip()
+    return make_meta(args.repo, args.issue, actor, args.request, args.mode, base,
+                     os.environ.get("GITHUB_RUN_ID", "local"))
 
 
 def reservations(meta):
@@ -78,26 +85,34 @@ def prepare(meta):
     items = reservations(meta)
     if previous_report(items, meta):
         print("У запроса уже есть итоговый отчёт.")
-        return output(proceed="false", resume="")
+        return output(proceed="false", resume="", attempt="", resume_only="false")
     claim_prefix = f"<!-- coordinator:claim:{meta['key']}:"
     claim = next((item for item in items if (item.get("body") or "").startswith(claim_prefix)), None)
     if claim and not claim["body"].startswith(marker(meta, "claim")):
         print("Запрос закреплён за предыдущим запуском. Для восстановления повторите его в Actions.")
-        return output(proceed="false", resume="")
-    if not claim:
+        return output(proceed="false", resume="", attempt="", resume_only="false")
+    resume = ""
+    if claim:
+        artifacts = api(
+            meta["repo"], f"actions/runs/{meta['workflow']}/artifacts?per_page=100", paginate=True,
+        )
+        candidates = [
+            int(item["name"].split("-")[-1])
+            for page in artifacts for item in page.get("artifacts", [])
+            if not item["expired"] and re.fullmatch(r"coordinator-state-[1-9][0-9]{0,6}", item["name"])
+        ]
+        if candidates:
+            resume = f"coordinator-state-{max(candidates)}"
+    else:
         verify_main(meta)
-        issue_data(meta["repo"], meta["issue"], meta["base"])
+        issue_data(meta["repo"], meta["issue"], meta["base"], meta["actor"])
         add_comment(meta, f"{marker(meta, 'claim')}\nЗапрос принят. [Запуск GitHub Actions]({run_url(meta)}).")
-    artifacts = api(
-        meta["repo"], f"actions/runs/{meta['workflow']}/artifacts?per_page=100", paginate=True,
-    )
-    candidates = [
-        int(item["name"].split("-")[-1])
-        for page in artifacts for item in page.get("artifacts", [])
-        if not item["expired"] and re.fullmatch(r"coordinator-state-[1-9][0-9]{0,6}", item["name"])
-    ]
-    resume = f"coordinator-state-{max(candidates)}" if candidates else ""
-    output(proceed="true", resume=resume)
+    resume_only = bool(claim and meta["mode"] != "dry-run")
+    if resume_only and not resume:
+        raise Blocked("У платного запроса нет сохранённого состояния. Повтор с тем же ключом остановлен.")
+    attempt = identity(os.environ["GITHUB_RUN_ATTEMPT"], re.compile(r"[1-9][0-9]{0,6}"))
+    output(proceed="true", resume=resume, attempt=attempt,
+           resume_only="true" if resume_only else "false")
 
 
 def fresh(meta, use_fixture=False):
@@ -105,10 +120,10 @@ def fresh(meta, use_fixture=False):
         return fixture()
     if os.environ.get("GITHUB_ACTIONS") == "true":
         verify_main(meta)
-    return issue_data(meta["repo"], meta["issue"], meta["base"])
+    return issue_data(meta["repo"], meta["issue"], meta["base"], meta["actor"])
 
 
-def run_task(args, meta, path):
+def run_task(args, meta, path, key):
     current = lambda: fresh(meta, args.fixture)
     prefixes = tuple(os.environ.get("COORDINATOR_PATHS", "").split())
     run = Run(path, meta)
@@ -132,13 +147,22 @@ def run_task(args, meta, path):
         try:
             if args.mode == "task" and not prefixes:
                 raise Blocked("Для обычных задач задайте COORDINATOR_PATHS.")
-            execute(run, snapshot, current, Codex(), prefixes)
+            if run.state.get("paid_started") or os.environ.get("COORDINATOR_RESUME_ONLY") == "true":
+                raise Blocked("Платный запуск был прерван. Проверьте расход перед созданием нового ключа.")
+            model = Codex.model_config(key)
+            run.state["paid_started"] = True
+            run.save()
+            with Gateway(key, model, args.mode) as gateway:
+                execute(run, snapshot, current, Codex(gateway), prefixes)
+                run.state["budget"] = gateway.summary()
+                run.save()
         except Blocked as error:
             run.finish("blocked", str(error))
     print(report(run.state))
 
 
 def excerpt(text):
+    text = re.sub(r"(?:https?://|www\.)[^\s]+", "[ссылка удалена]", text, flags=re.I)
     return " ".join(text.split()).translate(str.maketrans("@<>[]`", "＠‹›［］′"))[:2000]
 
 
@@ -168,6 +192,12 @@ def report(state, delivery=""):
         f"Учтённые токены {totals['input_tokens']} входных, "
         f"{totals['cached_input_tokens']} кэшированных входных и {totals['output_tokens']} выходных."
     )
+    if budget := state.get("budget"):
+        lines.append(
+            f"Резерв API · {budget['requests']}/{budget['max_requests']} запросов, "
+            f"{budget['input_reserved']}/{budget['max_input']} входных, "
+            f"{budget['output_reserved']}/{budget['max_output']} выходных токенов."
+        )
     if estimate is not None:
         lines.append(f"Оценка стоимости по заданным тарифам — ${estimate}.")
     if delivery:
@@ -215,8 +245,11 @@ def push_result(meta, state):
 
 def publish(meta, path):
     check_author(meta["repo"], meta["actor"])
-    if previous_report(reservations(meta), meta):
+    items = reservations(meta)
+    if previous_report(items, meta):
         return
+    if not any((item.get("body") or "").split("\n", 1)[0] == marker(meta, "claim") for item in items):
+        raise Blocked("У запуска нет подтверждённой записи о начале работы.")
     if not path.is_file():
         raise Blocked("Артефакт состояния отсутствует. Повторите исходный запуск.")
     state = Run(path, meta).state
@@ -253,6 +286,7 @@ def parser():
 
 def main():
     args = parser().parse_args()
+    key = os.environ.pop("CODEX_API_KEY", None)
     try:
         meta = request_meta(args)
         if args.operation != "run":
@@ -282,7 +316,7 @@ def main():
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.with_suffix(".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            run_task(args, meta, path)
+            run_task(args, meta, path, key)
         return 0
     except (Blocked, subprocess.SubprocessError, OSError) as error:
         message = str(error) if isinstance(error, Blocked) else "Операция координатора завершилась ошибкой."
