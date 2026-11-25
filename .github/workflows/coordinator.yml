@@ -48,6 +48,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - run: |
+          npm install --global --prefix "$RUNNER_TEMP/codex-cli" --no-audit --no-fund @openai/codex@0.172.0
+          echo "$RUNNER_TEMP/codex-cli/bin" >> "$GITHUB_PATH"
       - run: python3 -m unittest discover -s coordinator/tests -v
       - run: python3 -m coordinator run --issue 13 --fixture --mode dry-run
 

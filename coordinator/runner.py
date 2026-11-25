@@ -60,6 +60,7 @@ class Codex:
                 "--disable", "shell_tool", "--disable", "unified_exec",
                 "--disable", "multi_agent", "--disable", "multi_agent_v2",
                 "--disable", "apps", "--disable", "plugins", "--disable", "hooks",
+                "--disable", "view_image", "--disable", "image_generation", "--disable", "goals",
                 "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
                 "-c", 'model_reasoning_effort="low"',
                 "--model", self.model, "--json", "--output-schema", str(work / "schema.json"),

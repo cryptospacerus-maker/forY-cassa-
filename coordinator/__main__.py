@@ -139,7 +139,7 @@ def run_task(args, meta, path):
 
 
 def excerpt(text):
-    return " ".join(text.split()).replace("@", "＠").replace("<", "‹").replace(">", "›")[:2000]
+    return " ".join(text.split()).translate(str.maketrans("@<>[]`", "＠‹›［］′"))[:2000]
 
 
 def report(state, delivery=""):
@@ -229,7 +229,10 @@ def publish(meta, path):
         except Blocked:
             unchanged = False
         if unchanged:
-            delivery += " · " + push_result(meta, state)
+            try:
+                delivery += " · " + push_result(meta, state)
+            except Blocked as error:
+                state.update(status="blocked", reason=f"Публикация результата: {error}")
         else:
             state.update(status="blocked", reason="Требования обновились перед публикацией.")
     add_comment(meta, f"{marker(meta, 'report')}\n@{meta['actor']}\n\n{report(state, delivery)}")
