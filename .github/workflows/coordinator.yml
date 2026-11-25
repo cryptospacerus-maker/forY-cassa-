@@ -1,0 +1,140 @@
+name: Coordinator MVP
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Coordinator issue={0} mode={1} request={2}', inputs.issue, inputs.mode, inputs.request) || 'Coordinator tests' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "Номер открытого Issue"
+        required: true
+        type: number
+      request:
+        description: "Ключ запроса. Повтор с тем же ключом не запускает новые сессии"
+        required: true
+        type: string
+      mode:
+        description: "Режим работы"
+        required: true
+        default: dry-run
+        type: choice
+        options: [dry-run, demo, task]
+  push:
+    branches: [feature/coordinator-mvp]
+    paths:
+      - 'coordinator/**'
+      - 'agents/**'
+      - '.github/workflows/coordinator-notify.yml'
+      - '.github/workflows/coordinator.yml'
+
+permissions: {}
+
+concurrency:
+  group: coordinator-${{ github.event_name == 'workflow_dispatch' && inputs.issue || github.ref }}
+  cancel-in-progress: false
+
+env:
+  COORDINATOR_ACTORS: ${{ vars.COORDINATOR_ACTORS }}
+  COORDINATOR_PATHS: ${{ vars.COORDINATOR_PATHS }}
+  COORDINATOR_USD_PER_MTOK: ${{ vars.COORDINATOR_USD_PER_MTOK }}
+  ISSUE: ${{ inputs.issue }}
+  REQUEST: ${{ inputs.request }}
+  MODE: ${{ inputs.mode }}
+
+jobs:
+  tests:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: |
+          npm install --global --prefix "$RUNNER_TEMP/codex-cli" --no-audit --no-fund --ignore-scripts @openai/codex@0.172.0
+          echo "$RUNNER_TEMP/codex-cli/bin" >> "$GITHUB_PATH"
+      - run: python3 -m unittest discover -s coordinator/tests -v
+      - run: python3 -m coordinator run --issue 13 --fixture --mode dry-run
+
+  prepare:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    outputs:
+      proceed: ${{ steps.claim.outputs.proceed }}
+      resume: ${{ steps.claim.outputs.resume }}
+      attempt: ${{ steps.claim.outputs.attempt }}
+      resume_only: ${{ steps.claim.outputs.resume_only }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: claim
+        run: python3 -m coordinator prepare --issue="$ISSUE" --request="$REQUEST" --mode="$MODE" --state="$RUNNER_TEMP/coordinator/state.json"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  coordinate:
+    needs: prepare
+    if: needs.prepare.outputs.proceed == 'true' && fromJSON(needs.prepare.outputs.attempt || '0') == github.run_attempt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    environment: coordinator-live
+    permissions:
+      contents: read
+      issues: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - if: needs.prepare.outputs.resume != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.prepare.outputs.resume }}
+          path: ${{ runner.temp }}/coordinator
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+      - if: inputs.mode != 'dry-run' && needs.prepare.outputs.resume_only != 'true'
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/codex-cli" --no-audit --no-fund --ignore-scripts @openai/codex@0.172.0
+          echo "$RUNNER_TEMP/codex-cli/bin" >> "$GITHUB_PATH"
+      - run: python3 -m coordinator run --issue="$ISSUE" --request="$REQUEST" --mode="$MODE" --state="$RUNNER_TEMP/coordinator/state.json"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_API_KEY: ${{ inputs.mode != 'dry-run' && needs.prepare.outputs.resume_only != 'true' && secrets.COORDINATOR_OPENAI_API_KEY || '' }}
+          COORDINATOR_MODEL: ${{ vars.COORDINATOR_MODEL }}
+          COORDINATOR_RESUME_ONLY: ${{ needs.prepare.outputs.resume_only }}
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coordinator-state-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/coordinator/state.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    needs: [prepare, coordinate]
+    if: needs.prepare.outputs.proceed == 'true' && needs.coordinate.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: coordinator-state-${{ needs.prepare.outputs.attempt }}
+          path: ${{ runner.temp }}/coordinator
+      - run: python3 -m coordinator publish --issue="$ISSUE" --request="$REQUEST" --mode="$MODE" --state="$RUNNER_TEMP/coordinator/state.json"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COORDINATOR_DRAFT_PR: ${{ vars.COORDINATOR_DRAFT_PR }}
