@@ -1,0 +1,41 @@
+{
+  "type": "object",
+  "properties": {
+    "issue_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "target_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "track": {
+      "enum": [
+        "business",
+        "integrator"
+      ]
+    },
+    "case_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "evidence_manifest_path": {
+      "type": "string",
+      "pattern": "^evaluation/evidence/[A-Za-z0-9_./-]+\\.json$"
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    }
+  },
+  "required": [
+    "issue_number",
+    "target_sha",
+    "track",
+    "case_version",
+    "evidence_manifest_path",
+    "request_id"
+  ],
+  "additionalProperties": false
+}
