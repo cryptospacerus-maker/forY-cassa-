@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
 from threading import Barrier
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -62,6 +63,7 @@ class RunTest(unittest.TestCase):
 
         def agent(role, instruction, payload, contract):
             if role in {"developer", "interface"} and not payload["feedback"]:
+                self.assertEqual(payload["inventory"]["items"], ["pencil", "paper"])
                 barrier.wait(timeout=8)
             if role == "developer":
                 payload = dict(payload, feedback=["fixture fixes immediately"])
@@ -75,6 +77,20 @@ class RunTest(unittest.TestCase):
         self.assertNotIn("pencil", self.journal.events.read_text())
         self.assertEqual([item["role"] for item in events if item["event"] == "task.handoff"],
                          ["developer", "interface"])
+
+    def test_candidate_pack_recovers_exact_verified_commit_in_fresh_repo(self):
+        result, _ = self.run_fixture(demo_fixture.model, set())
+        sha = result["sha"]
+        with TemporaryDirectory() as work:
+            root = git("rev-parse", "--show-toplevel").decode().strip()
+            subprocess.run(["git", "init", "--quiet", work], check=True)
+            run = ["git", "-C", work]
+            subprocess.run([*run, "fetch", "--quiet", root, self.base], check=True)
+            self.assertNotEqual(subprocess.run([*run, "cat-file", "-e", sha], capture_output=True).returncode, 0)
+            with (self.journal.path / "candidate.pack").open("rb") as pack:
+                subprocess.run([*run, "unpack-objects"], stdin=pack, check=True)
+            remote_tree = subprocess.check_output([*run, "rev-parse", f"{sha}^{{tree}}"])
+            self.assertEqual(remote_tree, git("rev-parse", f"{sha}^{{tree}}"))
 
     def test_dependency_contains_previous_result_and_constrained_excerpt(self):
         def agent(role, instruction, payload, contract):
@@ -156,10 +172,12 @@ class ActualDockerTest(unittest.TestCase):
     def test_untrusted_process_timeout_is_bounded_and_container_is_removed(self):
         check = Check("timeout-probe", "execution", ("developer",),
                       ("python3", "-B", "-c", "import time; time.sleep(20)"), 3)
-        evidence = self.sandbox.run(check, self.base)
+        ident = "643b1e6cd705455ba36a8e532151fca3"
+        with patch("coordinator_v2.runtime.uuid4", return_value=SimpleNamespace(hex=ident)):
+            evidence = self.sandbox.run(check, self.base)
         self.assertEqual(evidence.status, "timeout")
         active = subprocess.run(
-            ["docker", "ps", "-a", "--filter", "name=coordinator-v2-", "--format", "{{.Names}}"],
+            ["docker", "ps", "-a", "--filter", f"name=coordinator-v2-{ident}", "--format", "{{.Names}}"],
             check=True, capture_output=True, text=True,
         )
         self.assertEqual(active.stdout.strip(), "")

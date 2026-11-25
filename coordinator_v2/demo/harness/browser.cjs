@@ -26,9 +26,12 @@ const assert = require('node:assert/strict');
     const origin = `http://127.0.0.1:${server.address().port}`;
     browser = await chromium.launch({ chromiumSandbox: false, timeout: 15000 });
     const context = await browser.newContext({ serviceWorkers: 'block' });
+    let denied = 0;
     await context.route('**/*', route => {
       const url = new URL(route.request().url());
-      return url.origin === origin ? route.continue() : route.abort();
+      if (url.origin === origin) return route.continue();
+      denied += 1;
+      return route.abort();
     });
     const page = await context.newPage();
     const errors = [];
@@ -46,6 +49,10 @@ const assert = require('node:assert/strict');
     await category.selectOption('all');
     assert.equal(await list.count(), 3);
     assert.equal(await page.getByRole('status').isVisible(), false);
+    const outsideReachable = await page.evaluate(() =>
+      fetch('http://127.0.0.1:1/blocked').then(() => true, () => false));
+    assert.equal(outsideReachable, false);
+    assert.ok(denied >= 1);
     assert.deepEqual(errors, []);
     console.log('PASS: synthetic catalog, filter, empty state and reset');
   } finally {

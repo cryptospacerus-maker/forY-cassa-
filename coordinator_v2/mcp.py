@@ -1,5 +1,6 @@
 """Role-gated MCP transport for the fixed synthetic provider."""
 
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -102,9 +103,9 @@ class Gateway:
         with self.lock:
             if category in self.cache:
                 self.hits += 1
-                return self.cache[category], True
+                return deepcopy(self.cache[category]), True
             if self.requests >= 3:
                 raise Blocked("Исчерпан лимит вызовов тестового MCP.")
             self.requests += 1
             self.cache[category] = fixture_call(category)
-            return self.cache[category], False
+            return deepcopy(self.cache[category]), False

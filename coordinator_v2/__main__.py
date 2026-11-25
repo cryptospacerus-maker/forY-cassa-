@@ -46,6 +46,9 @@ def main():
         if args.mode == "fixture" and args.project != "lab":
             raise Blocked("Тестовый режим поддерживает профиль lab.")
         project = Project.load(base, args.project)
+        journal.metadata["project"] = args.project
+        if args.mode == "task" and args.issue and args.issue > 0:
+            journal.metadata["issue"] = args.issue
         features = set(args.enable)
         sandbox = DockerSandbox(args.image, project, base) if features - {"mcp"} else None
         fixture_plan = None

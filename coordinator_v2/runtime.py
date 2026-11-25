@@ -21,6 +21,8 @@ IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
 CHECK_ID = re.compile(r"[a-z][a-z0-9-]{0,39}")
 MAX_EXPORT = 2 * 1024 * 1024
 MAX_LOG = 64 * 1024
+PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+             "http_proxy", "https_proxy", "all_proxy", "no_proxy")
 
 
 @dataclass(frozen=True)
@@ -125,9 +127,18 @@ class Evidence:
     exit_code: int | None
     log_bytes: int
     log_sha256: str
+    diagnostics: tuple = ()
 
     def data(self):
-        return asdict(self)
+        evidence = asdict(self)
+        del evidence["diagnostics"]
+        return evidence
+
+
+def diagnostics(logs):
+    labels = ("FAIL:", "ERROR:", "AssertionError:", "SyntaxError:", "TimeoutError:")
+    return tuple(line.strip()[:160] for line in logs.decode(errors="replace").splitlines()
+                 if line.lstrip().startswith(labels))[:3]
 
 
 def docker(*args):
@@ -180,6 +191,7 @@ class DockerSandbox:
                 "--shm-size", "128m", "--log-driver", "none",
                 "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=96m,mode=1777",
                 "--workdir", "/case", "--env", "HOME=/tmp", "--env", "CI=1",
+                *(value for name in PROXY_ENV for value in ("--env", f"{name}=")),
                 "--mount", f"type=bind,source={area / 'case'},target=/case,readonly",
                 "--mount", f"type=bind,source={area / 'harness'},target=/harness,readonly",
                 "--entrypoint", check.argv[0], self.image, *check.argv[1:],
@@ -199,7 +211,8 @@ class DockerSandbox:
                 state = json.loads(docker("inspect", "--format", "{{json .State}}", container))
                 if state["Status"] != "exited" or state["Error"] or state["OOMKilled"] or code in {125, 126, 127}:
                     status = "infrastructure"
-            return Evidence(check.name, sha, status, code, len(logs), hashlib.sha256(logs).hexdigest())
+            return Evidence(check.name, sha, status, code, len(logs), hashlib.sha256(logs).hexdigest(),
+                            diagnostics(logs) if status == "fail" else ())
         except OSError:
             raise Blocked("Docker не запустил проверку.") from None
         finally:

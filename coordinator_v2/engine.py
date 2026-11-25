@@ -145,22 +145,22 @@ class Engine:
             for name in requested:
                 result = self.check(capabilities[name], snapshot, role, round_no)
                 if result.status == "fail":
-                    failures.append(name)
+                    failures.append({"check": name, "diagnostics": result.diagnostics})
         return proposal, {"summary": answer["summary"][:500], "files": sorted(proposal),
                           "failed_checks": failures}
 
     def candidate(self, sha):
-        (self.journal.path / "candidate.patch").write_bytes(
-            git("diff", "--binary", "--no-ext-diff", self.base, sha, "--", self.project.source)
-        )
-        (self.journal.path / "candidate.pack").write_bytes(
-            git("pack-objects", "--stdout", "--revs", data=f"{sha}\n^{self.base}\n".encode())
-        )
+        patch = git("diff", "--binary", "--no-ext-diff", self.base, sha, "--", self.project.source)
+        pack = git("pack-objects", "--stdout", "--revs", data=f"{sha}\n^{self.base}\n".encode())
+        (self.journal.path / "candidate.patch").write_bytes(patch)
+        (self.journal.path / "candidate.pack").write_bytes(pack)
 
     def run(self, snapshot, current, fixture_plan=None):
         offline = fixture_plan is not None
-        self.journal.emit("run.started", base=self.base, features=sorted(self.features),
-                          backend="offline-fixture" if offline else "codex")
+        self.backend = "offline-fixture" if offline else "codex"
+        self.journal.emit("run.started", base=self.base, features=sorted(self.features), backend=self.backend,
+                          sandbox_image=getattr(self.sandbox, "image", None)
+                          if isinstance(getattr(self.sandbox, "image", None), str) else None)
         original = digest(snapshot)
         def recheck():
             if digest(current()) != original:
@@ -224,7 +224,7 @@ class Engine:
                     result = self.check(check, sha, "tester", round_no)
                     if result.status == "fail":
                         for role in (set(check.owners) & assignments.keys()) or assignments:
-                            findings[role].append(check.name)
+                            findings[role].append({"check": check.name, "diagnostics": result.diagnostics})
                     recheck()
                 if any(findings.values()):
                     verdict = "fail"
@@ -259,7 +259,8 @@ class Engine:
             return self.finish("blocked", reason="Ответ агента или настройка проекта не соответствует контракту.")
 
     def finish(self, status, **fields):
-        return self.journal.finish(status, base=self.base, model_sessions=len(self.sessions),
+        return self.journal.finish(status, base=self.base, backend=self.backend,
+            features=sorted(self.features), model_sessions=len(self.sessions),
             context_bytes=sum(session.get("context_bytes", 0) for session in self.sessions),
             usage=usage_totals(dict(enumerate(self.sessions))),
             mcp_requests=self.mcp.requests, mcp_cache_hits=self.mcp.hits, **fields)
