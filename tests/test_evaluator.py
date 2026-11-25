@@ -1,15 +1,10 @@
-import copy
-import json
-import math
-import os
 import tempfile
 import unittest
-from unittest.mock import patch
-from scripts.evaluator.common import ROOT, read_json, git
-from scripts.evaluator.collect import blob, collect, digest
+from pathlib import Path
+from scripts.evaluator.common import ROOT, dump, read_json, git
+from scripts.evaluator.collect import blob, digest
 from scripts.evaluator.validate import validate_report
-from scripts.evaluator.model import configuration, assess
-from scripts.evaluator.run import run
+from scripts.evaluator.run import prepare, finalize
 from scripts.evaluator.render import render
 
 class JudgeTests(unittest.TestCase):
@@ -49,64 +44,30 @@ class JudgeTests(unittest.TestCase):
         with self.assertRaises(ValueError): blob('a'*40,'../secret')
     def test_hash(self):
         self.assertEqual(digest(b'abc'),'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
-    def test_budget_blocks_absent(self):
-        with patch.dict(os.environ,{},clear=True),self.assertRaises(ValueError): configuration(100)
-    def test_budget_blocks_nan(self):
-        with patch.dict(os.environ,{'JUDGE_MAX_USD':'nan'},clear=True),self.assertRaises(ValueError): configuration(100)
-    def test_budget_blocks_excess(self):
-        env={'JUDGE_MAX_USD':'0.001','JUDGE_INPUT_USD_PER_MILLION':'10','JUDGE_OUTPUT_USD_PER_MILLION':'10',
-             'JUDGE_MODEL':'configured-model','JUDGE_PRICING_VERIFIED_ON':'2026-11-24'}
-        with patch.dict(os.environ,env,clear=True),self.assertRaises(ValueError): configuration(10000)
     def test_mentions_neutralized(self):
         self.report.update(metadata={'target_sha':'a'*40,'request_id':'x'},status='partial',summary='@all <script>')
         self.assertNotIn('@all',render(self.report,self.rubric))
-    def test_blocked_report_written(self):
-        with tempfile.TemporaryDirectory() as d:
-            result=run({'target_sha':'bad','request_id':'test'},d,{},True)
-            self.assertEqual(result['status'],'blocked')
-            self.assertTrue(os.path.exists(d+'/report.md'))
-    def test_model_transport_and_validation(self):
-        env={'JUDGE_MAX_USD':'2','JUDGE_INPUT_USD_PER_MILLION':'1','JUDGE_OUTPUT_USD_PER_MILLION':'1',
-             'JUDGE_MODEL':'configured-model','JUDGE_PRICING_VERIFIED_ON':'2026-11-24','OPENAI_API_KEY':'test-only'}
-        from io import BytesIO
-        fake={'status':'completed','output':[{'content':[{'type':'output_text','text':json.dumps(self.report)}]}],
-              'usage':{'input_tokens':100,'output_tokens':200}}
-        with patch.dict(os.environ,env,clear=True),patch('urllib.request.urlopen',return_value=BytesIO(json.dumps(fake).encode())) as transport:
-            value,meta=assess('profile',self.schema,self.rubric,{'evidence':[]})
-            sent=json.loads(transport.call_args.args[0].data)
-            self.assertNotIn('tools',sent)
-            self.assertFalse(sent['store'])
-            self.assertEqual(value,self.report)
-            self.assertEqual(meta['usage']['input_tokens'],100)
-
-class DeliveryTests(unittest.TestCase):
-    def test_duplicate_reservation_blocks(self):
-        from scripts.evaluator.prepare import prepare
-        env={'GITHUB_EVENT_PATH':'event.json','GITHUB_REF':'refs/heads/main','GITHUB_ACTOR':'semen','JUDGE_ALLOWED_ACTORS':'semen,tolya'}
-        event={'repository':{'full_name':'cryptospacerus-maker/forY-cassa-'},'inputs':{'issue_number':'10','target_sha':'a'*40,'track':'integrator','case_version':'v1','evidence_manifest_path':'evaluation/evidence/manifest.json','request_id':'one'}}
-        from scripts.evaluator.common import read_json as real_read
-        with patch.dict(os.environ,env,clear=True), patch('scripts.evaluator.prepare.read_json',side_effect=lambda p:event if str(p)=='event.json' else real_read(p)), patch('scripts.evaluator.prepare.api',side_effect=[{'permission':'write'},{'title':'x','body':'x','html_url':'url'}]) as api, patch('scripts.evaluator.prepare.comments',return_value=[{'body':'<!-- judge-request:one -->','user':{'login':'github-actions[bot]'}}]):
-            with self.assertRaises(ValueError): prepare()
-            self.assertEqual(api.call_count,2)
-    def test_unapproved_actor_blocks(self):
-        from scripts.evaluator.prepare import prepare
-        env={'GITHUB_EVENT_PATH':'event.json','GITHUB_REF':'refs/heads/main','GITHUB_ACTOR':'outsider','JUDGE_ALLOWED_ACTORS':'semen'}
-        with patch.dict(os.environ,env,clear=True),patch('scripts.evaluator.prepare.read_json',return_value={'repository':{'full_name':'cryptospacerus-maker/forY-cassa-'}}),patch('scripts.evaluator.prepare.api') as api:
-            with self.assertRaises(ValueError): prepare()
-            api.assert_not_called()
-    def test_untrusted_branch_blocks(self):
-        from scripts.evaluator.prepare import prepare
-        with patch.dict(os.environ,{'GITHUB_EVENT_PATH':'x','GITHUB_REF':'refs/heads/attacker'},clear=True),patch('scripts.evaluator.prepare.read_json',return_value={'repository':{'full_name':'cryptospacerus-maker/forY-cassa-'}}):
-            with self.assertRaises(ValueError): prepare()
-    def test_publish_missing_report(self):
-        from scripts.evaluator.publish import publish
-        with patch.dict(os.environ,{'GITHUB_RUN_ID':'123'},clear=True),patch('scripts.evaluator.publish.read_json',return_value={'marker':'marker','actor':'semen','comment_id':7}),patch('scripts.evaluator.publish.Path.exists',return_value=False),patch('scripts.evaluator.publish.api') as api:
-            publish()
-            self.assertIn('заблокирована',api.call_args.args[2]['body'])
-    def test_comment_pagination(self):
-        from scripts.evaluator.github_io import comments
-        with patch('scripts.evaluator.github_io.api',side_effect=[[{}]*100,[{'body':'last'}]]) as api:
-            self.assertEqual(len(comments(10)),101)
-            self.assertIn('page=2',api.call_args.args[0])
-
-if __name__=='__main__': unittest.main()
+    def test_codex_packet_and_report(self):
+        request = {
+            'issue_number': 10, 'target_sha': git('rev-parse', 'HEAD').decode().strip(),
+            'track': 'integrator', 'case_version': 'v1', 'request_id': 'codex-test',
+            'evidence_manifest_path': 'evaluation/evidence/manifest.json',
+        }
+        context = {'github_issue': {'title': 'Контроль'}, 'main_instructions': {'AGENTS.md': 'test'}}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'packet'
+            packet_digest = prepare(request, context, output)
+            assessment = Path(directory) / 'assessment.json'
+            dump(assessment, {'packet_sha256': 'wrong', 'assessment': self.report})
+            with self.assertRaisesRegex(ValueError, 'SHA-256'):
+                finalize(output, assessment)
+            self.assertFalse((output / 'report.json').exists())
+            dump(assessment, {'packet_sha256': packet_digest, 'assessment': self.report})
+            result = finalize(output, assessment)
+            self.assertEqual(result['status'], 'partial')
+            self.assertEqual(result['metadata']['evaluation_mode'], 'codex-session')
+            self.assertEqual(result['metadata']['target_sha'], request['target_sha'])
+            self.assertTrue((output / 'report.md').exists())
+            self.assertNotIn('context', read_json(output / 'manifest.json'))
+            with self.assertRaisesRegex(ValueError, 'finalized'):
+                finalize(output, assessment)
