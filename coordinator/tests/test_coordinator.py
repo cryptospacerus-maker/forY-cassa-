@@ -233,7 +233,10 @@ class GitHubTest(unittest.TestCase):
         ]}]
         cli.prepare(self.meta)
         comment.assert_not_called()
-        output.assert_called_once_with(proceed="true", resume="coordinator-state-2", attempt="4", resume_only="true")
+        output.assert_called_once_with(
+            proceed="true", resume="coordinator-state-2", attempt="4", resume_only="true",
+            sandbox="false", route_token=cli.digest(cli.routing("demo")),
+        )
 
     @patch.object(cli, "check_author")
     @patch.object(cli, "reservations", return_value=[{"body": "<!-- coordinator:claim:key:100 -->"}])

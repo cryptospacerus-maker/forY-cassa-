@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coordinator journal event",
+  "type": "object",
+  "required": ["schema_version", "sequence", "run_id", "time", "event"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "sequence": {"type": "integer", "minimum": 1},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,64}$"},
+    "time": {"type": "string", "format": "date-time"},
+    "event": {"type": "string", "pattern": "^[a-z]+(\\.[a-z]+)+$"},
+    "repository": {"type": "string"},
+    "issue": {"type": "integer", "minimum": 1},
+    "initiator": {"type": "string"},
+    "mode": {"enum": ["dry-run", "demo", "task"]},
+    "workflow_run_id": {"type": "string"},
+    "role": {"enum": ["analyst", "developer", "interface", "tester"]},
+    "round": {"type": "integer", "minimum": 0, "maximum": 2},
+    "sha": {"$ref": "#/$defs/optionalSha"},
+    "base": {"$ref": "#/$defs/optionalSha"},
+    "published_sha": {"$ref": "#/$defs/optionalSha"},
+    "notification": {"enum": ["issue-comment", "failed", "already-posted"]},
+    "routing": {
+      "type": "object",
+      "required": ["engine", "features", "project"],
+      "properties": {
+        "engine": {"enum": ["v1", "v2"]},
+        "features": {
+          "type": "array", "uniqueItems": true,
+          "items": {"enum": ["execution", "tests", "browser", "mcp"]}
+        },
+        "project": {"type": ["string", "null"]}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["check", "sha", "status", "exit_code", "log_bytes", "log_sha256"],
+      "properties": {
+        "check": {"type": "string"},
+        "sha": {"$ref": "#/$defs/sha"},
+        "status": {"enum": ["pass", "fail", "timeout", "output-limit", "infrastructure"]},
+        "exit_code": {"type": ["integer", "null"]},
+        "log_bytes": {"type": "integer", "minimum": 0, "maximum": 65536},
+        "log_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "optionalSha": {"anyOf": [{"$ref": "#/$defs/sha"}, {"type": "null"}]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event": {"const": "check.finished"}}},
+      "then": {"required": ["role", "round", "evidence"]}
+    },
+    {
+      "if": {"properties": {"event": {"enum": ["qa.started", "qa.finished"]}}},
+      "then": {"required": ["sha", "role", "round"]}
+    },
+    {
+      "if": {"properties": {"event": {"enum": ["publication.finished", "publication.failed"]}}},
+      "then": {"required": ["notification", "published_sha"]}
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+name: Coordinator V2
+on:
+  push:
+    branches: [feature/coordinator-v2]
+    paths: [coordinator/**, coordinator_v2/**, .github/workflows/coordinator*.yml]
+  pull_request:
+    paths: [coordinator/**, coordinator_v2/**, .github/workflows/coordinator*.yml]
+permissions:
+  contents: read
+
+jobs:
+  fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: |
+          npm install --global --prefix "$RUNNER_TEMP/codex-cli" --no-audit --no-fund --ignore-scripts @openai/codex@0.172.0
+          echo "$RUNNER_TEMP/codex-cli/bin" >> "$GITHUB_PATH"
+      - run: python3 -m unittest discover -s coordinator/tests -v
+      - run: |
+          python3 -m venv "$RUNNER_TEMP/coordinator-test-python"
+          "$RUNNER_TEMP/coordinator-test-python/bin/pip" install jsonschema==4.23.0
+          echo "$RUNNER_TEMP/coordinator-test-python/bin" >> "$GITHUB_PATH"
+      - run: python3 -m unittest discover -s tests -v
+      - run: docker build -t coordinator-v2-sandbox:local coordinator_v2/sandbox
+      - env:
+          COORDINATOR_V2_TEST_IMAGE: coordinator-v2-sandbox:local
+          COORDINATOR_V2_EVIDENCE_DIR: ${{ runner.temp }}/coordinator-unified-fixture
+        run: python3 -m unittest discover -s coordinator_v2/tests -v
+      - run: >-
+          python3 -m coordinator_v2 --output "$RUNNER_TEMP/v2-results"
+          --enable execution --enable tests --enable browser --enable mcp
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coordinator-v2-fixture
+          path: ${{ runner.temp }}/v2-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coordinator-unified-fixture
+          path: ${{ runner.temp }}/coordinator-unified-fixture/
+          if-no-files-found: ignore
+          retention-days: 7
