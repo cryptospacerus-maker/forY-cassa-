@@ -2,6 +2,8 @@ from email.message import Message
 from io import BytesIO
 import json
 import os
+import shutil
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +12,8 @@ from threading import Thread
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
+
+from contextlib import closing
 
 from coordinator.context import Blocked, digest, git
 from coordinator_v2.demo_fixture import SNAPSHOT
@@ -99,6 +103,21 @@ class HardeningTest(unittest.TestCase):
         with patch.dict(os.environ, {"COORDINATOR_V3_GIT_STORE": str(store)}):
             self.assertEqual(git("rev-parse", "--is-bare-repository").strip(), b"true")
             self.assertEqual(git("for-each-ref", "refs/coordinator-v3/preflight"), b"")
+        restored = self.root / "restore"
+        restored.mkdir(mode=0o700)
+        state_queue = Queue(state / "queue.sqlite")
+        key = state_queue.submit(self.spec)
+        candidate_ref = f"refs/coordinator-v3/{key}"
+        with patch.dict(os.environ, {"COORDINATOR_V3_GIT_STORE": str(store)}):
+            git("update-ref", candidate_ref, self.base)
+        with closing(sqlite3.connect(state / "queue.sqlite")) as source, closing(
+                sqlite3.connect(restored / "queue.sqlite")) as target:
+            source.backup(target)
+            self.assertEqual(target.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        shutil.copytree(store, restored / "git")
+        with patch.dict(os.environ, {"COORDINATOR_V3_GIT_STORE": str(restored / "git")}):
+            self.assertEqual(git("rev-parse", candidate_ref).decode().strip(), self.base)
+        self.assertEqual(Queue(restored / "queue.sqlite").status()["runs"][0]["dispatch"], "awaiting_github")
 
     def test_authentication_precedes_read_and_rotation_revokes_token(self):
         credentials = {name: {"token": name * 16, "account": name}

@@ -16,9 +16,18 @@
    ```
 
    Убедитесь, что каталог `git/` имеет режим 0700. V3 передаёт `--git-dir` к этому хранилищу для чтения и записи объектов и refs. SQLite и WAL находятся под `/var/lib/coordinator-v3`, временные файлы unit — в `/run/coordinator-v3`. Код и Git store могут обновляться независимо. Импорт сверяет адреса origin для чтения и записи и подгружает недостающий проверенный main.
-3. В `/etc/coordinator-v3/settings` задайте `V3_BASE_SHA` (доверенный main), `V3_QA_IMAGE`, `DOCKER_HOST` (сокет rootless Docker) и `COORDINATOR_ACTORS` (список логинов через пробел, заключённый в кавычки). Подготовьте `workers.json` и `github-reader` с правами 0600 для systemd LoadCredential. Скопируйте [unit](deploy/coordinator-v3.service) и проверьте его через `systemd-analyze verify`.
-4. До подключения Worker выполните preflight под тем же UID и ограничениями, что в unit. Он запускается как `ExecStartPre`. Для отдельного прогона скопируйте unit под именем `coordinator-v3-preflight.service`, замените основную `ExecStart` командой из `ExecStartPre`, удалите исходную `ExecStartPre`, добавьте `Type=oneshot` и уберите `Restart=on-failure`. В журнале должны быть подтверждены SQLite/WAL, создание и чтение синтетического Git-кандидата/refs, приватный временный каталог и реальный Python/браузерный запуск из закреплённого Docker-образа. Незакреплённый или недоступный образ блокирует старт по unit.
-5. Проверьте отдельные служебные полномочия. Reader получает только нужное чтение Issues, коммитов и прав инициатора. У publisher должна быть возможность писать Issues и только ветку результата. `publish` сверяет `/user` с ожидаемым логином перед записью. Для пилота используйте отдельного ограниченного служебного пользователя с пользовательским токеном и его настроенный Git credential helper. Сверьте фактический Git-аккаунт и защиту `main` с администратором. Файлы токенов храните с правами 0600. Выпуск и ротация краткоживущих GitHub App installation tokens находятся за границей этого пилота.
+3. Для rootless Docker с сокетом в `/run/user/<UID>/docker.sock` создайте drop-in unit. `ProtectHome=yes` скрывает `/run/user`, поэтому явно откройте только сокет. Подставьте числовой UID пользователя `coordinator` и одинаковые пути в drop-in и `DOCKER_HOST`:
+
+   ```ini
+   [Service]
+   BindReadOnlyPaths=/run/user/1001/docker.sock:/run/coordinator-v3/docker.sock
+   ```
+
+   Установите `DOCKER_HOST=unix:///run/coordinator-v3/docker.sock`. До запуска unit rootless Docker должен уже слушать сокет. При отдельном приватном сокете вне `/run/user` можно указать доступный service user путь напрямую.
+
+4. В `/etc/coordinator-v3/settings` задайте `V3_BASE_SHA` (доверенный main), `V3_QA_IMAGE`, `DOCKER_HOST` (сокет rootless Docker) и `COORDINATOR_ACTORS` (список логинов через пробел, заключённый в кавычки). Подготовьте `workers.json` и `github-reader` с правами 0600 для systemd LoadCredential. Скопируйте [unit](deploy/coordinator-v3.service) и проверьте его через `systemd-analyze verify`.
+5. До подключения Worker выполните preflight под тем же UID и ограничениями, что в unit. Он запускается как `ExecStartPre`. Для отдельного прогона скопируйте unit под именем `coordinator-v3-preflight.service`, замените основную `ExecStart` командой из `ExecStartPre`, удалите исходную `ExecStartPre`, добавьте `Type=oneshot` и уберите `Restart=on-failure`. В журнале должны быть подтверждены SQLite/WAL, создание и чтение синтетического Git-кандидата/refs, приватный временный каталог и реальный Python/браузерный запуск из закреплённого Docker-образа. Незакреплённый или недоступный образ блокирует старт по unit.
+6. Проверьте отдельные служебные полномочия. Reader получает только нужное чтение Issues, коммитов и прав инициатора. У publisher должна быть возможность писать Issues и только ветку результата. `publish` сверяет `/user` с ожидаемым логином перед записью. Для пилота используйте отдельного ограниченного служебного пользователя с пользовательским токеном и его настроенный Git credential helper. Сверьте фактический Git-аккаунт и защиту `main` с администратором. Файлы токенов храните с правами 0600. Выпуск и ротация краткоживущих GitHub App installation tokens находятся за границей этого пилота.
 
 ## HTTPS и диагностика
 
