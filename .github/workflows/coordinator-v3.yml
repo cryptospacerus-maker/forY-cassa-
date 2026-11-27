@@ -1,0 +1,43 @@
+name: Coordinator V3
+on:
+  push:
+    branches: [feature/coordinator-v3]
+  pull_request:
+    paths: [coordinator/**, coordinator_v2/**, coordinator_v3/**, evaluation/**, tests/**, scripts/evaluator/**, .github/workflows/coordinator-v3.yml]
+permissions:
+  contents: read
+
+jobs:
+  offline-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned offline-test dependencies
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/v3-codex" --no-audit --no-fund --ignore-scripts @openai/codex@0.172.0
+          echo "$RUNNER_TEMP/v3-codex/bin" >> "$GITHUB_PATH"
+          python3 -m venv "$RUNNER_TEMP/v3-python"
+          "$RUNNER_TEMP/v3-python/bin/pip" install -r evaluation/requirements.txt
+          echo "$RUNNER_TEMP/v3-python/bin" >> "$GITHUB_PATH"
+      - run: |
+          test "$(codex --version)" = 'codex-cli 0.172.0'
+          docker build -t coordinator-v2-sandbox:local coordinator_v2/sandbox
+      - env:
+          COORDINATOR_V2_TEST_IMAGE: coordinator-v2-sandbox:local
+        run: |
+          python3 -m unittest coordinator_v3.test_spike coordinator_v3.test_v3 coordinator_v3.test_hardening -v
+          python3 -m unittest discover -s coordinator/tests -v
+          python3 -m unittest discover -s coordinator_v2/tests -v
+          python3 -m unittest discover -s tests -v
+      - name: Probe bare Git state and real Docker from V3
+        run: |
+          umask 077
+          state=$(mktemp -d)
+          git clone --bare --no-local . "$state/git"
+          git --git-dir="$state/git" remote set-url origin https://github.com/cryptospacerus-maker/forY-cassa-.git
+          image=$(docker image inspect --format '{{.Id}}' coordinator-v2-sandbox:local)
+          python3 -m coordinator_v3 --state "$state" preflight --base "$(git rev-parse HEAD)" --image "$image"
