@@ -1,6 +1,6 @@
 """Durable worker registration, fenced leases and audit events."""
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import sqlite3
 import time
@@ -13,6 +13,8 @@ ERRORS = {"auth", "quota", "timeout", "unavailable", "cli_error",
           "invalid_output", "wrong_session", "uncertain", "invalid_job"}
 PAUSED = {"auth", "quota", "unavailable", "uncertain"}
 MAX_BODY = 128 * 1024
+ADMISSION_TTL = 30
+MAX_ACTIVE_RUNS = 8
 
 
 class Conflict(Exception):
@@ -39,7 +41,7 @@ def transaction(path):
 class Queue:
     def __init__(self, path, *, lease=45, presence=90, clock=time.time):
         self.path, self.lease, self.presence, self.clock = path, lease, presence, clock
-        with sqlite3.connect(path, timeout=10) as db:
+        with closing(sqlite3.connect(path, timeout=10)) as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS workers (
@@ -49,6 +51,16 @@ class Queue:
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY, spec TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
                     result TEXT, published TEXT
+                );
+                CREATE TABLE IF NOT EXISTS admission (
+                    run TEXT PRIMARY KEY REFERENCES runs(id), checked REAL NOT NULL, until REAL NOT NULL,
+                    snapshot TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS reviews (
+                    job TEXT PRIMARY KEY REFERENCES jobs(id), resolution TEXT NOT NULL, time REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS usage (
+                    job TEXT PRIMARY KEY REFERENCES jobs(id), sample TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY, run TEXT NOT NULL REFERENCES runs(id), role TEXT NOT NULL,
@@ -92,6 +104,11 @@ class Queue:
 
     def unpause(self, worker):
         with transaction(self.path) as db:
+            unresolved = db.execute("""SELECT 1 FROM jobs j LEFT JOIN reviews r ON r.job=j.id
+                WHERE j.worker=? AND j.status='needs_review' AND j.error='uncertain'
+                AND (r.resolution IS NULL OR r.resolution='outcome_unknown')""", (worker,)).fetchone()
+            if unresolved:
+                raise Conflict("unresolved_execution")
             if db.execute("UPDATE workers SET pause=NULL WHERE id=?", (worker,)).rowcount != 1:
                 raise Conflict("unknown_worker")
             self.event(db, "worker.resumed", worker=worker)
@@ -105,9 +122,56 @@ class Queue:
                 if row["spec"] != packed:
                     raise Conflict("request_changed")
                 return key
+            if db.execute("SELECT count(*) FROM runs WHERE status='pending'").fetchone()[0] >= MAX_ACTIVE_RUNS:
+                raise Conflict("active_run_limit")
             db.execute("INSERT INTO runs(id,spec) VALUES(?,?)", (key, packed))
             self.event(db, "run.submitted", run=key)
         return key
+
+    def revoke(self, run=None):
+        with transaction(self.path) as db:
+            if run is None:
+                db.execute("DELETE FROM admission")
+            else:
+                db.execute("DELETE FROM admission WHERE run=?", (run,))
+
+    def admit(self, run, snapshot_hash, checked):
+        with transaction(self.path) as db:
+            row = db.execute("SELECT spec,status FROM runs WHERE id=?", (run,)).fetchone()
+            if not row or row["status"] != "pending":
+                raise Conflict("run_closed")
+            if snapshot_hash != digest(json.loads(row["spec"])["snapshot"]):
+                raise Conflict("requirements_changed")
+            if not checked <= self.clock() < checked + ADMISSION_TTL:
+                raise Conflict("verification_expired")
+            db.execute("INSERT OR REPLACE INTO admission VALUES(?,?,?,?)",
+                       (run, checked, checked + ADMISSION_TTL, snapshot_hash))
+
+    def finish(self, run, result):
+        with transaction(self.path) as db:
+            if db.execute("UPDATE runs SET status=?,result=? WHERE id=? AND status='pending'",
+                          (result["status"], encode(result), run)).rowcount != 1:
+                raise Conflict("run_closed")
+            db.execute("DELETE FROM admission WHERE run=?", (run,))
+            db.execute("""UPDATE workers SET pause=coalesce(pause,'uncertain')
+                WHERE id IN (SELECT worker FROM jobs WHERE run=? AND status='leased')""", (run,))
+            db.execute("UPDATE jobs SET status='cancelled' WHERE run=? AND status='queued'", (run,))
+            db.execute("""UPDATE jobs SET status='needs_review',error='uncertain'
+                WHERE run=? AND status='leased'""", (run,))
+            self.event(db, "run.finished", run=run, status=result["status"])
+
+    def review(self, job, resolution):
+        with transaction(self.path) as db:
+            self.expire(db)
+            row = db.execute("SELECT run,status,worker FROM jobs WHERE id=?", (job,)).fetchone()
+            if not row or row["status"] != "needs_review":
+                raise Conflict("job_not_in_review")
+            if not db.execute("""INSERT INTO reviews VALUES(?,?,?)
+                    ON CONFLICT(job) DO UPDATE SET resolution=excluded.resolution,time=excluded.time
+                    WHERE reviews.resolution='outcome_unknown' AND excluded.resolution!='outcome_unknown'""",
+                              (job, resolution, self.clock())).rowcount:
+                raise Conflict("review_already_recorded")
+            self.event(db, "job.reviewed", run=row["run"], job=job, worker=row["worker"], status=resolution)
 
     def step(self, run, role, round_no, payload):
         worker = ROUTES[role]
@@ -121,7 +185,8 @@ class Queue:
             if row:
                 if row["payload"] != packed:
                     raise Conflict("step_context_changed")
-                return dict(row)
+                sample = db.execute("SELECT sample FROM usage WHERE job=?", (key,)).fetchone()
+                return {**dict(row), "usage": json.loads(sample["sample"]) if sample else None}
             active = db.execute("SELECT status FROM runs WHERE id=?", (run,)).fetchone()
             if not active or active["status"] != "pending":
                 raise Conflict("run_closed")
@@ -155,9 +220,12 @@ class Queue:
             busy = db.execute("SELECT 1 FROM jobs WHERE worker=? AND status='leased'", (worker,)).fetchone()
             if state["pause"] or busy:
                 return None
+            now = self.clock()
             row = db.execute("""SELECT j.* FROM jobs j JOIN runs r ON j.run=r.id
-                WHERE j.worker=? AND j.status='queued' AND r.status='pending' ORDER BY j.rowid LIMIT 1""",
-                             (worker,)).fetchone()
+                LEFT JOIN admission a ON a.run=r.id
+                WHERE j.worker=? AND j.status='queued' AND r.status='pending'
+                AND (json_extract(r.spec,'$.mode')='fixture' OR (a.checked<=? AND a.until>?))
+                ORDER BY j.rowid LIMIT 1""", (worker, now, now)).fetchone()
             if not row:
                 return None
             attempt = uuid4().hex
@@ -182,7 +250,12 @@ class Queue:
                 raise Conflict("lease_expired")
             db.execute("UPDATE jobs SET deadline=? WHERE id=?", (self.clock() + self.lease, job))
 
-    def complete(self, worker, account, job, attempt, *, answer=None, error=None):
+    def complete(self, worker, account, job, attempt, *, answer=None, error=None, usage=None):
+        from .cli import usage_sample
+
+        sample = usage_sample(usage)
+        if sample != usage or (error is not None and sample is not None):
+            raise Conflict("invalid_usage")
         if (answer is None) == (error is None) or (error is not None and error not in ERRORS):
             raise Conflict("invalid_result")
         packed = encode(answer) if answer is not None else None
@@ -191,9 +264,14 @@ class Queue:
             self.touch(db, worker, account)
             row = self.owned(db, worker, job, attempt)
             if (row["status"], row["result"], row["error"]) == (status, packed, error):
+                saved = db.execute("SELECT sample FROM usage WHERE job=?", (job,)).fetchone()
+                if (json.loads(saved["sample"]) if saved else None) != sample:
+                    raise Conflict("result_changed")
                 return
             if row["status"] != "leased" or row["deadline"] <= self.clock():
                 raise Conflict("lease_expired")
+            if sample is not None:
+                db.execute("INSERT INTO usage VALUES(?,?)", (job, encode(sample)))
             db.execute("UPDATE jobs SET status=?,result=?,error=? WHERE id=?", (status, packed, error, job))
             if error in PAUSED:
                 db.execute("UPDATE workers SET pause=? WHERE id=?", (error, worker))
@@ -211,5 +289,10 @@ class Queue:
             for worker in set(ROUTES.values()) - workers.keys():
                 workers[worker] = {"status": "offline"}
             return {"workers": workers, "runs": [dict(row) for row in db.execute(
-                "SELECT id,status,published FROM runs")], "jobs": [dict(row) for row in db.execute(
-                "SELECT id,run,role,status,error FROM jobs")]}
+                """SELECT r.id,r.status,r.published,a.until AS admission_until,
+                    CASE WHEN r.status!='pending' THEN 'closed'
+                    WHEN json_extract(r.spec,'$.mode')='fixture' THEN 'fixture'
+                    WHEN a.checked<=? AND a.until>? THEN 'ready' ELSE 'awaiting_github' END AS dispatch
+                    FROM runs r LEFT JOIN admission a ON a.run=r.id""", (now, now))],
+                "jobs": [dict(row) for row in db.execute("""SELECT j.id,j.run,j.role,j.status,j.error,
+                    r.resolution FROM jobs j LEFT JOIN reviews r ON r.job=j.id""")]}

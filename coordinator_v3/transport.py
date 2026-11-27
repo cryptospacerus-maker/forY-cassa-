@@ -3,6 +3,8 @@
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import re
+from threading import BoundedSemaphore
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -48,11 +50,35 @@ class Client:
             raise OSError("coordinator unavailable") from error
 
 
-def server(port, queue, credentials):
+class BoundedServer(ThreadingHTTPServer):
+    request_queue_size = 16
+
+    def __init__(self, *args):
+        self.slots = BoundedSemaphore(16)
+        super().__init__(*args)
+
+    def process_request(self, request, address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, address):
+        try:
+            super().process_request_thread(request, address)
+        finally:
+            self.slots.release()
+
+
+def server(port, queue, credentials, *, allowed_version=None):
     if (set(credentials) != set(ROUTES.values()) or
             len({value["token"] for value in credentials.values()}) != len(credentials) or
             len({value["account"] for value in credentials.values()}) != len(credentials) or
-            not all(len(value["token"]) >= 32 and 0 < len(value["account"]) <= 80
+            not all(re.fullmatch(r"[A-Za-z0-9_-]{32,128}", value["token"]) and 0 < len(value["account"]) <= 80
                     for value in credentials.values())):
         raise ValueError("Configure one distinct credential and account alias per worker")
 
@@ -76,26 +102,32 @@ def server(port, queue, credentials):
             action = self.path.removeprefix("/v1/")
             if self.path != f"/v1/{action}" or action not in {"register", "claim", "heartbeat", "complete"}:
                 return self.reply(404, {"error": "unknown_endpoint"})
+            supplied = self.headers.get("Authorization", "").encode()
+            worker = None
+            for name, credential in credentials.items():
+                if hmac.compare_digest(supplied, f"Bearer {credential['token']}".encode()):
+                    worker = name
+            if worker is None:
+                return self.reply(401, {"error": "worker_identity_mismatch"})
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= MAX_BODY:
+                if self.headers.get("Transfer-Encoding") or not 0 < length <= MAX_BODY:
                     raise ValueError
                 data = json.loads(self.rfile.read(length))
-                worker, account = data.pop("worker"), data.pop("account")
-                credential = credentials.get(worker)
-                supplied = self.headers.get("Authorization", "").encode()
-                if (not credential or not hmac.compare_digest(
-                        supplied, f"Bearer {credential['token']}".encode())
-                        or account != credential["account"]):
+                owner, account = data.pop("worker"), data.pop("account")
+                if owner != worker or account != credentials[worker]["account"]:
                     return self.reply(401, {"error": "worker_identity_mismatch"})
-                if action == "register" and (
-                        not isinstance(data.get("version"), str) or len(data["version"]) > 120):
-                    raise ValueError
+                if action == "register":
+                    version = data.get("version")
+                    if not isinstance(version, str) or len(version) > 120:
+                        raise ValueError
+                    if allowed_version is not None and version != allowed_version:
+                        raise Conflict("unsupported_cli_version")
                 result = getattr(queue, action)(worker, account, **data)
             except Conflict as error:
                 return self.reply(409, {"error": str(error)})
-            except (ValueError, KeyError, TypeError, AttributeError):
+            except (ValueError, KeyError, TypeError, AttributeError, OSError):
                 return self.reply(400, {"error": "invalid_request"})
             return self.reply(200, {"result": result})
 
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    return BoundedServer(("127.0.0.1", port), Handler)

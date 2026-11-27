@@ -48,6 +48,14 @@ def classify(text, fallback):
     return fallback
 
 
+def usage_sample(value):
+    if not isinstance(value, dict):
+        return None
+    fields = ("input_tokens", "cached_input_tokens", "output_tokens")
+    sample = {key: value[key] for key in fields if type(value.get(key)) is int and 0 <= value[key] <= 2**53 - 1}
+    return sample or None
+
+
 def parse_turn(stdout, stderr, returncode, answer_path, schema, previous):
     try:
         events = [json.loads(line) for line in stdout.splitlines()]
@@ -81,7 +89,7 @@ def parse_turn(stdout, stderr, returncode, answer_path, schema, previous):
         validate(answer, schema)
         if json.loads(replies[-1]) != answer:
             raise ValueError
-        return thread, answer
+        return thread, answer, usage_sample(turns[0].get("usage"))
     except (ValueError, AttributeError, KeyError, TypeError, IndexError, OSError):
         if returncode:
             raise CliError(classify(stderr.decode(errors="replace"), "cli_error")) from None

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sys
+import shlex
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 from concurrent.futures import ThreadPoolExecutor
@@ -67,6 +68,9 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(reopened.step(self.key, "analyst", 0, {})["status"], "needs_review")
         with self.assertRaisesRegex(Conflict, "lease_expired"):
             reopened.complete("third", "acct", row["id"], job["attempt"], answer={"answer": "late"})
+        with self.assertRaisesRegex(Conflict, "unresolved_execution"):
+            reopened.unpause("third")
+        reopened.review(row["id"], "confirmed_stopped")
         reopened.unpause("third")
         self.assertIsNone(reopened.claim("third", "acct"))
         with self.assertRaisesRegex(Conflict, "request_changed"):
@@ -96,7 +100,7 @@ class RuntimeTest(unittest.TestCase):
 
         def adapter(job, *args):
             executions.append(job["id"])
-            return str(uuid4()), {"answer": "done"}
+            return str(uuid4()), {"answer": "done"}, None
 
         def client(action, payload):
             worker, account = payload.pop("worker"), payload.pop("account")
@@ -131,10 +135,24 @@ class RuntimeTest(unittest.TestCase):
             with self.assertRaisesRegex(Conflict, "worker_request_rejected"):
                 other("register", {"worker": "third", "account": creds["third"]["account"], "version": "test"})
             calls = []
+            requirement = "Отдельное условие из Issue, отсутствующее в плане Игорька."
+            snapshot = {**self.spec["snapshot"], "body": requirement}
+            self.spec = dict(self.spec, snapshot=snapshot, request="complete")
+            self.key = self.queue.submit(self.spec)
+            with transaction(self.path) as db:
+                db.execute("UPDATE runs SET status='cancelled' WHERE id!=?", (self.key,))
 
             def fake(job, work, home, previous, cancelled):
                 role = job["role"]
                 payload = json.loads(job["prompt"].rsplit("\nКонтекст: ", 1)[1])
+                self.assertEqual(payload["requirements"]["body"], requirement)
+                from coordinator.context import digest
+                self.assertEqual(payload["requirements_sha256"], digest(snapshot))
+                self.assertEqual(payload["base_sha"], self.spec["base"])
+                if role in {"developer", "interface"}:
+                    self.assertTrue(payload["criteria"] and payload["allowed_paths"] and payload["files"])
+                if role == "interface":
+                    self.assertIn("developer", payload["dependencies"])
                 if role == "analyst":
                     answer = demo_fixture.plan("dependency")
                     for task in answer["tasks"]:
@@ -143,7 +161,7 @@ class RuntimeTest(unittest.TestCase):
                     answer = demo_fixture.model(role, "", payload, job["schema"])["answer"]
                 thread = previous or str(uuid4())
                 calls.append((role, work, home, previous, thread))
-                return thread, answer
+                return thread, answer, {"input_tokens": 2} if role == "developer" else None
 
             workers = [
                 Worker(Client(url, cred["token"]), self.root / name, name, cred["account"], "fake CLI", fake)
@@ -154,13 +172,20 @@ class RuntimeTest(unittest.TestCase):
                 advance(self.open_queue(), self.root, lambda spec: spec["snapshot"], lambda *_: sandbox)
                 for worker in workers:
                     worker.once()
-                if self.queue.status()["runs"][0]["status"] != "pending":
+                if all(run["status"] != "pending" for run in self.queue.status()["runs"]):
                     break
             with transaction(self.path) as db:
-                result = json.loads(db.execute("SELECT result FROM runs").fetchone()[0])
+                result = json.loads(db.execute("SELECT result FROM runs WHERE id=?", (self.key,)).fetchone()[0])
             self.assertEqual(result["status"], "passed", result)
             self.assertEqual([check["verdict"] for check in result["checks"]], ["fail", "pass"])
             self.assertEqual(delivery_state(self.spec, self.key, result), result["sha"])
+            self.assertIsNone(result["usage"]["total"])
+            samples = result["usage"]["samples"]
+            self.assertTrue(any(item["usage"] is None for item in samples))
+            self.assertTrue(any(item["resume"] and item["usage"] == {"input_tokens": 2} for item in samples))
+            rejected = dict(result, checks=[dict(result["checks"][-1], evidence=[])])
+            with self.assertRaises(Blocked):
+                delivery_state(self.spec, self.key, rejected)
             self.assertEqual(len(set(sandbox.calls)), len(sandbox.calls))
 
             analyst, developer, interface, repair, dependent, tester = calls
@@ -248,7 +273,10 @@ class CliTest(unittest.TestCase):
         self.root = Path(temp.name)
         self.binary = self.root / "codex"
         self.thread = str(uuid4())
-        self.binary.write_text(f"#!{sys.executable}\n" + """
+        script = self.root / "fixture python.py"
+        self.binary.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " "
+                               + shlex.quote(str(script)) + ' "$@"\n')
+        script.write_text("""
 import json, os, sys, time
 from pathlib import Path
 args = sys.argv[1:]
@@ -280,7 +308,8 @@ Path(args[args.index('-o')+1]).write_text(json.dumps(answer if prompt != 'invali
 print('failed to load models cache: missing field supports_parallel_tool_calls', file=sys.stderr)
 print(json.dumps({'type': 'thread.started', 'thread_id': thread}))
 print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(answer)}}))
-print(json.dumps({'type': 'turn.completed'}))
+print(json.dumps({'type': 'turn.completed', 'usage': (
+    {'input_tokens': 8, 'cached_input_tokens': 0, 'internal': 12} if prompt == 'resume' else None)}))
 """)
         self.binary.chmod(0o700)
 
@@ -290,8 +319,8 @@ print(json.dumps({'type': 'turn.completed'}))
 
     def test_poc_format_environment_and_explicit_resume(self):
         with patch.dict("os.environ", {"OPENAI_API_KEY": "test", "GH_TOKEN": "test"}):
-            self.assertEqual(self.call("create"), (self.thread, {"answer": "create"}))
-            self.assertEqual(self.call("resume", self.thread), (self.thread, {"answer": "resume"}))
+            self.assertEqual(self.call("create"), (self.thread, {"answer": "create"}, None))
+            self.assertEqual(self.call("resume", self.thread), (self.thread, {"answer": "resume"}, {"input_tokens": 8, "cached_input_tokens": 0}))
 
     def test_classifies_failures_and_bounds_output(self):
         for prompt, error in (("quota", "quota"), ("auth", "auth"), ("invalid", "invalid_output"),

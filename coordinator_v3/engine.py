@@ -41,13 +41,15 @@ class PersistentChecks:
 
 
 class QueuedEngine(Engine):
-    def __init__(self, base, project, features, sandbox, journal, queue, mode):
+    def __init__(self, base, project, features, sandbox, journal, queue, spec):
         super().__init__(base, project, features, sandbox, None, journal, export_candidate=False)
-        self.queue, self.mode = queue, mode
+        self.queue, self.spec = queue, spec
 
     def invoke(self, role, instruction, payload, contract, round_no):
+        payload = {**payload, "requirements": self.spec["snapshot"],
+                   "requirements_sha256": digest(self.spec["snapshot"]), "base_sha": self.base}
         context_bytes = len(encode(payload).encode())
-        if context_bytes > 56_000:
+        if context_bytes > 85_000:
             raise Blocked("Превышен лимит контекста роли.")
         profile = git("show", f"{self.base}:agents/{role}.md").decode()
         protocol = git("show", f"{self.base}:agents/protocol.md").decode()
@@ -59,7 +61,7 @@ class QueuedEngine(Engine):
             "Для изменения файлов верни их полное новое содержимое.\n"
             f"Профиль: {profile}\n{general}\n{sections[role]}\nПоручение: {instruction}\nКонтекст: {encode(payload)}"
         )
-        row = self.queue.step(self.journal.run_id, role, round_no, {"prompt": prompt, "schema": contract, "mode": self.mode})
+        row = self.queue.step(self.journal.run_id, role, round_no, {"prompt": prompt, "schema": contract, "mode": self.spec["mode"]})
         if row["status"] in {"queued", "leased"}:
             raise Pending
         if row["status"] != "ok":
@@ -70,9 +72,17 @@ class QueuedEngine(Engine):
         except CliError:
             raise Blocked("Ответ роли не соответствует схеме.") from None
         with self.lock:
-            self.sessions.append({"context_bytes": context_bytes})
+            self.sessions.append({"context_bytes": context_bytes, "usage": row["usage"],
+                                  "role": role, "round": round_no, "resume": row["parent"] is not None})
         self.journal.emit("agent.finished", role=role, round=round_no, status="ok")
         return answer
+
+    def finish(self, status, **fields):
+        samples = [{key: item[key] for key in ("role", "round", "resume", "usage")}
+                   for item in sorted(self.sessions, key=lambda item: (item["round"], item["role"]))]
+        return self.journal.finish(status, base=self.base, features=sorted(self.features),
+            model_sessions=len(samples), context_bytes=sum(item["context_bytes"] for item in self.sessions),
+            usage={"scope": "cli_reported_sample", "total": None, "samples": samples}, **fields)
 
 
 def advance(queue, output, current, sandbox_factory=DockerSandbox):
@@ -86,6 +96,13 @@ def advance(queue, output, current, sandbox_factory=DockerSandbox):
         with TemporaryDirectory(dir=output, prefix="replay-") as temp:
             journal = Journal(Path(temp) / "journal", {"backend": "worker-queue"}, run_id=run)
             try:
+                queue.revoke(run)
+                checked = queue.clock()
+                snapshot = current(spec)
+                if isinstance(snapshot, tuple):
+                    checked, snapshot = snapshot
+                if digest(snapshot) != digest(spec["snapshot"]):
+                    raise Blocked("Требования изменились. Нужен новый запуск.")
                 project = Project.load(spec["base"], spec["project"])
                 if any(path.split("/")[0] == "coordinator_v3" for path in (project.source, project.harness)):
                     raise Blocked("Профиль затрагивает код координатора V3.")
@@ -94,12 +111,25 @@ def advance(queue, output, current, sandbox_factory=DockerSandbox):
                 if sandbox.image != spec["image"]:
                     raise Blocked("Docker-образ отличается от закреплённого образа QA.")
                 engine = QueuedEngine(spec["base"], project, features,
-                                      PersistentChecks(queue, run, sandbox), journal, queue, spec["mode"])
-                result = engine.run(spec["snapshot"], lambda: current(spec))
+                                      PersistentChecks(queue, run, sandbox), journal, queue, spec)
+                result = engine.run(spec["snapshot"], lambda: snapshot)
                 result.update(backend="worker-queue", checks=engine.qa_rounds, criteria=engine.criteria)
-            except (Pending, Deferred):
+            except Deferred:
+                queue.revoke()
                 continue
-            except (Blocked, Conflict) as error:
+            except Pending:
+                if spec["mode"] == "github":
+                    try:
+                        queue.admit(run, digest(snapshot), checked)
+                    except Conflict as error:
+                        if str(error) not in {"verification_expired", "run_closed"}:
+                            raise
+                continue
+            except Conflict as error:
+                if str(error) in {"verification_expired", "run_closed"}:
+                    continue
+                result = journal.finish("blocked", reason=str(error), checks=[], criteria=[])
+            except Blocked as error:
                 result = journal.finish("blocked", reason=str(error), checks=[], criteria=[])
             result["base"] = spec["base"]
             # Write the final V2-compatible event sequence before committing the terminal state.
@@ -108,14 +138,14 @@ def advance(queue, output, current, sandbox_factory=DockerSandbox):
                 git("update-ref", f"refs/coordinator-v3/{run}", result["sha"])
             events = output / f"{run}.jsonl"
             journal.events.replace(events)
-            with transaction(queue.path) as db:
-                db.execute("UPDATE runs SET status=?,result=? WHERE id=?",
-                           (result["status"], encode(result), run))
-                db.execute("""UPDATE workers SET pause=coalesce(pause,'uncertain')
-                    WHERE id IN (SELECT worker FROM jobs WHERE run=? AND status='leased')""", (run,))
-                db.execute("UPDATE jobs SET status='cancelled' WHERE run=? AND status IN ('queued','leased')",
-                           (run,))
-                queue.event(db, "run.finished", run=run, status=result["status"])
+            try:
+                queue.finish(run, result)
+            except Conflict as error:
+                if str(error) != "run_closed":
+                    raise
+                events.unlink(missing_ok=True)
+                if result["status"] == "passed":
+                    git("update-ref", "-d", f"refs/coordinator-v3/{run}", result["sha"])
 
 
 def delivery_state(spec, run, result):

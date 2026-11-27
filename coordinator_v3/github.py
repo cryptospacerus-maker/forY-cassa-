@@ -1,13 +1,16 @@
 """Explicit GitHub admission and recoverable publication on the V3 route."""
 
 import json
+import os
 import re
 
 from coordinator.__main__ import add_comment, excerpt, make_meta, verify_main
 from coordinator.context import Blocked, api, check_author, comments, digest, git, issue_data
 
 from .engine import Deferred, delivery_state
-from .queue import encode, transaction
+from .api import REFRESH
+from .queue import transaction
+from .operations import ensure_base, verify_origin
 
 COMMAND = re.compile(r"/coordinator-v3 ([A-Za-z0-9][A-Za-z0-9_-]{0,39})")
 
@@ -28,21 +31,55 @@ def ingest(queue, repo, issue, comment, project, features, image):
         if db.execute("SELECT 1 FROM runs WHERE id=?", (key,)).fetchone():
             return key
     base = api(repo, "git/ref/heads/main")["object"]["sha"]
+    if os.environ.get("COORDINATOR_V3_GIT_STORE"):
+        ensure_base(repo, base)
     spec = make_meta(repo.lower(), issue, actor, command[1], "v3", base, "local")
-    spec.update(mode="github", project=project, features=features, image=image,
-                snapshot=issue_data(repo, issue, base, actor))
+    spec.update(mode="github", protocol=2, command_id=comment, project=project, features=features, image=image,
+                snapshot=issue_data(repo, issue, base, actor, strict=True))
     return queue.submit(spec)
 
 
 def current(spec):
     try:
-        check_author(spec["repo"], spec["actor"])
+        if spec.get("protocol") != 2:
+            raise Blocked("Запуск создан до смены протокола. Требуется новая команда после сверки.")
+        repo, issue, actor = (spec[key] for key in ("repo", "issue", "actor"))
+        command = api(repo, f"issues/comments/{spec['command_id']}")
+        if (command["user"]["login"].lower() != actor or command["user"]["type"] != "User"
+                or command["issue_url"] != f"https://api.github.com/repos/{repo}/issues/{issue}"
+                or (command.get("body") or "").strip() != f"/coordinator-v3 {spec['request']}"):
+            raise Blocked("Команда запуска изменена или принадлежит другому автору.")
+        check_author(repo, actor)
         verify_main(spec)
-        return issue_data(spec["repo"], spec["issue"], spec["base"], spec["actor"])
+        return issue_data(repo, issue, spec["base"], actor, strict=True)
     except Blocked as error:
         if str(error).startswith("GitHub API недоступен"):
             raise Deferred from None
         raise
+
+
+class SnapshotCache:
+    def __init__(self, transport, *, clock=None):
+        self.transport = transport
+        self.clock = clock or transport.clock
+        self.items = {}
+
+    def __call__(self, spec):
+        try:
+            self.transport.permit()
+            key = digest(spec)
+            started = self.clock()
+            checked, data = self.items.get(key, (None, None))
+            if checked is not None and checked <= started < checked + REFRESH:
+                return checked, data
+            with self.transport.installed():
+                data = current(spec)
+            self.items = {key: value for key, value in self.items.items() if started - value[0] < REFRESH}
+            self.items[key] = (started, data)
+            return started, data
+        except (Deferred, Blocked):
+            self.items.clear()
+            raise
 
 
 def publish(queue, run, publisher):
@@ -68,6 +105,8 @@ def publish(queue, run, publisher):
             if digest(current(spec)) != digest(spec["snapshot"]):
                 raise Blocked("Требования изменились до публикации.")
             sha = delivery_state(spec, run, result)
+            if os.environ.get("COORDINATOR_V3_GIT_STORE"):
+                verify_origin(spec["repo"])
             ref = f"refs/heads/coordinator/v3-result-{spec['issue']}-{run}"
             remote = git("ls-remote", "--refs", "origin", ref).decode().split()
             if remote and remote[0] != sha:

@@ -109,9 +109,9 @@ class Worker:
             env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
             subprocess.run(["git", "init", "--quiet", "--template="], cwd=directory, env=env,
                            check=True, capture_output=True, timeout=5)
-            thread, answer = self.adapter(job, directory, codex_home, previous, cancelled)
+            thread, answer, usage = self.adapter(job, directory, codex_home, previous, cancelled)
             validate(answer, job["schema"])
-            outcome = {"answer": answer}
+            outcome = {"answer": answer, "usage": usage}
         except CliError as error:
             outcome = {"error": str(error)}
         except Conflict:

@@ -1,0 +1,31 @@
+[Unit]
+Description=Coordinator V3 worker queue and admission
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=coordinator
+Group=coordinator
+WorkingDirectory=/opt/coordinator-v3
+EnvironmentFile=/etc/coordinator-v3/settings
+LoadCredential=workers.json:/etc/coordinator-v3/workers.json
+LoadCredential=github-reader:/etc/coordinator-v3/github-reader
+StateDirectory=coordinator-v3
+StateDirectoryMode=0700
+RuntimeDirectory=coordinator-v3
+RuntimeDirectoryMode=0700
+Environment=TMPDIR=/run/coordinator-v3 PYTHONDONTWRITEBYTECODE=1 HOME=/var/lib/coordinator-v3
+ExecStartPre=/usr/bin/python3 -m coordinator_v3 --state /var/lib/coordinator-v3 preflight --base ${V3_BASE_SHA} --image ${V3_QA_IMAGE}
+ExecStart=/usr/bin/python3 -m coordinator_v3 --state /var/lib/coordinator-v3 serve --credentials %d/workers.json --reader-token %d/github-reader --advance-github
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+UMask=0077
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/coordinator-v3 /run/coordinator-v3
+TimeoutStartSec=180s
+
+[Install]
+WantedBy=multi-user.target

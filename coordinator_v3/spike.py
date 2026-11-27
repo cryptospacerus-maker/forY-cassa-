@@ -1,4 +1,5 @@
 """Offline transport spike. A test injects a CLI double; no live worker is wired."""
+from contextlib import closing
 import json
 import sqlite3
 import subprocess
@@ -28,7 +29,7 @@ class Spike:
     def __init__(self, database, invoke):
         self.database = database
         self.invoke = invoke
-        with sqlite3.connect(database) as db:
+        with closing(sqlite3.connect(database)) as db, db:
             db.execute("""
                 CREATE TABLE IF NOT EXISTS steps (
                     task TEXT, role TEXT, worker TEXT, revision TEXT, step TEXT,
@@ -42,7 +43,7 @@ class Spike:
             raise Rejected("wrong_worker")
         scope = (work.task, work.role, work.worker, work.revision)
         key = (*scope, work.step)
-        with sqlite3.connect(self.database) as db:
+        with closing(sqlite3.connect(self.database)) as db, db:
             previous = None
             if continue_step is not None:
                 row = db.execute("""
@@ -66,7 +67,7 @@ class Spike:
             if previous is not None and thread != previous:
                 raise Rejected("wrong_session")
         except (Rejected, OSError, subprocess.TimeoutExpired, ValueError, TypeError) as error:
-            with sqlite3.connect(self.database) as db:
+            with closing(sqlite3.connect(self.database)) as db, db:
                 db.execute("""
                     UPDATE steps SET status='needs_review'
                     WHERE task=? AND role=? AND worker=? AND revision=? AND step=?
@@ -78,7 +79,7 @@ class Spike:
             if isinstance(error, OSError):
                 raise Rejected("unavailable") from None
             raise Rejected("invalid_output") from None
-        with sqlite3.connect(self.database) as db:
+        with closing(sqlite3.connect(self.database)) as db, db:
             db.execute("""
                 UPDATE steps SET status='ok', thread=?
                 WHERE task=? AND role=? AND worker=? AND revision=? AND step=?
